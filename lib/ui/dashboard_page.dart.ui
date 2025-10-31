@@ -1,0 +1,253 @@
+// lib/pages/dashboard_page.dart
+import 'package:flutter/material.dart';
+
+import 'package:gestor_calcados_new/models/sector_models.dart';
+import 'package:gestor_calcados_new/pages/sector_detail_page.dart';
+import 'package:gestor_calcados_new/pages/create_ticket_page.dart';
+
+class DashboardPage extends StatelessWidget {
+  const DashboardPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final stream = _offlineSectorsStream();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Bem-vindo à sua produção 👟'),
+      ),
+      body: StreamBuilder<List<SectorModel>>(
+        stream: stream,
+        builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final setores = snap.data ?? const <SectorModel>[];
+
+          if (setores.isEmpty) {
+            return const Center(
+              child: Text('Sem setores por enquanto (modo offline)'),
+            );
+          }
+
+          // destaque simples: produção da Montagem
+          final montagem = setores.firstWhere(
+            (s) => s.sector == Sector.montagem,
+            orElse: () => SectorModel(
+              sector: Sector.montagem,
+              emProducao: 0,
+              producaoDia: 0,
+              atualizacao: DateTime.now(),
+            ),
+          );
+          final totalHoje = montagem.producaoDia;
+
+          return Column(
+            children: [
+              const SizedBox(height: 12),
+              _ResumoGeral(totalHoje: totalHoje),
+              const SizedBox(height: 8),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final crossAxisCount = constraints.maxWidth >= 900 ? 3 : 2;
+                    return GridView.builder(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: crossAxisCount,
+                        mainAxisSpacing: 12,
+                        crossAxisSpacing: 12,
+                        childAspectRatio: 1.2,
+                      ),
+                      itemCount: setores.length,
+                      itemBuilder: (context, i) {
+                        final s = setores[i];
+                        return _SetorCard(
+                          icon: s.sector.icon,
+                          nome: s.sector.label,
+                          emProducao: s.emProducao,
+                          producaoDia: s.producaoDia,
+                          onTap: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) =>
+                                    SectorDetailPage(sectorModel: s),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+
+      // FAB: abre CreateTicketPage por MaterialPageRoute
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          try {
+            await Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const CreateTicketPage()),
+            );
+          } catch (e) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Falha ao abrir Criar Ficha: $e'),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            }
+          }
+        },
+        icon: const Icon(Icons.playlist_add),
+        label: const Text('Criar Ficha'),
+      ),
+    );
+  }
+
+  /// Stream offline fixa com todos os setores
+  Stream<List<SectorModel>> _offlineSectorsStream() {
+    final agora = DateTime.now();
+    final lista = Sector.values
+        .map((s) => SectorModel(
+              sector: s,
+              emProducao: 0,
+              producaoDia: 0,
+              atualizacao: agora,
+            ))
+        .toList();
+    return Stream.value(lista);
+  }
+}
+
+// ---------------- Widgets auxiliares ----------------
+
+class _ResumoGeral extends StatelessWidget {
+  final int totalHoje;
+  const _ResumoGeral({required this.totalHoje});
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    return Card(
+      elevation: 4,
+      margin: const EdgeInsets.symmetric(horizontal: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: primary.withOpacity(.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(Icons.assessment, size: 28, color: primary),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Produção diária (Montagem)',
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Row(
+                    children: [
+                      Text(
+                        '$totalHoje',
+                        style: Theme.of(context)
+                            .textTheme
+                            .displaySmall
+                            ?.copyWith(fontWeight: FontWeight.w800, height: 1),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'pares',
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(color: Colors.black54),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SetorCard extends StatelessWidget {
+  final IconData icon;
+  final String nome;
+  final int emProducao;
+  final int producaoDia;
+  final VoidCallback onTap;
+
+  const _SetorCard({
+    required this.icon,
+    required this.nome,
+    required this.emProducao,
+    required this.producaoDia,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: onTap,
+      child: Ink(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: const LinearGradient(
+            colors: [Color.fromARGB(255, 53, 87, 134), Color(0xFF111827)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, size: 28, color: Colors.white),
+              const Spacer(),
+              Text(
+                nome,
+                style: const TextStyle(
+                  fontSize: 16,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text('No setor: $emProducao',
+                  style: const TextStyle(color: Colors.white70)),
+              Text('Produção do dia: $producaoDia',
+                  style: const TextStyle(color: Colors.white70)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

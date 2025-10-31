@@ -1,0 +1,48 @@
+name: gestor_calcados_new
+description: App Gestor de Calçados
+publish_to: "none"
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Localização PT-BR (DatePicker etc.)
+  flutter_localizations:
+    sdk: flutter
+
+  # Utilidades
+  # === CORRIGIDO: Versão do intl exigida pelo flutter_localizations ===
+  intl: ^0.20.2 
+  # === FIM DA CORREÇÃO ===
+  path_provider: ^2.1.3
+
+  # Scanner de código
+  mobile_scanner: ^5.1.1 # Mantendo versão atualizada
+
+  # PDF / impressão / código de barras
+  pdf: ^3.11.0
+  printing: ^5.12.0
+  barcode: ^2.2.8
+
+  # Banco local (Hive)
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+
+  # Fontes
+  google_fonts: ^6.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0 # Manteve a sua versão
+
+  # Dependências para Geração de Código Hive
+  build_runner: ^2.4.10 
+  hive_generator: ^2.0.1 
+
+flutter:
+  uses-material-design: true
+
