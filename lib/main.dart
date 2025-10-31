@@ -1,5 +1,7 @@
-﻿import 'package:flutter/material.dart';
-import 'package:hive_flutter/hive_flutter.dart'; // Import hive_flutter
+﻿// lib/main.dart
+import 'package:flutter/material.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:flutter_localizations/flutter_localizations.dart'; // <-- 1. IMPORT ADICIONADO
 
 // Páginas
 import 'pages/dashboard_page.dart';
@@ -7,31 +9,46 @@ import 'pages/create_ticket_page.dart';
 
 // Hive + Repositórios
 import 'services/hive_service.dart';
-import 'data/adapters.dart'; // <= caminho correto
-import 'data/stats_repository.dart'; // <= usamos só este repo no bootstrap
+import 'data/adapters.dart';
+import 'data/stats_repository.dart';
 
-void main() async {
+// Gerenciador de produção
+import 'services/production_manager.dart';
+
+// Constantes de boxes
+const String kMovementsBox = 'movements_box';
+const String kSectorDailyBox = 'sector_daily';
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Inicializa o Hive para Flutter (chamada principal)
+  // 1. Inicializa o Hive para Flutter
   await Hive.initFlutter();
 
   // 2. Registra TODOS os adapters gerados
   await registerHiveAdapters();
 
-  // 3. Inicializa os serviços/repositórios que abrem Boxes específicos
-  // (HiveService.init() agora só abre 'tickets_box', não chama initFlutter)
+  // 3. Inicializa os serviços e repositórios
   await HiveService.init();
-  // (StatsRepository().init() abre movements_box, sector_daily)
   await StatsRepository().init();
 
+  // 4. Inicializa o ProductionManager com as boxes já abertas
+  final movementsBox = await Hive.openBox<dynamic>(kMovementsBox);
+  final dailyBox = await Hive.openBox<dynamic>(kSectorDailyBox);
+
+  // 2. CORREÇÃO: Usando a instância singleton .instance
+  await ProductionManager.instance.initHiveBoxes(
+    eventsBox: movementsBox,
+    countersBox: dailyBox,
+  );
+
+  // 5. Roda o app
   runApp(const MyApp());
 }
 
 class Routes {
   static const dashboard = '/';
   static const createTicket = '/create-ticket';
-  // Adicionar outras rotas aqui (login, signup, etc.) se necessário
 }
 
 class MyApp extends StatelessWidget {
@@ -46,12 +63,23 @@ class MyApp extends StatelessWidget {
         useMaterial3: true,
         colorSchemeSeed: const Color(0xFF223147),
       ),
-      initialRoute: Routes
-          .dashboard, // Mantenha ou mude para Routes.login se implementar login
+
+      // --- 3. ADIÇÃO: Configuração de Localização (pt-BR) ---
+      locale: const Locale('pt', 'BR'),
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [
+        Locale('pt', 'BR'),
+      ],
+      // ---------------------------------------------------
+
+      initialRoute: Routes.dashboard,
       routes: {
         Routes.dashboard: (_) => const DashboardPage(),
         Routes.createTicket: (_) => const CreateTicketPage(),
-        // Adicionar outras rotas aqui
       },
     );
   }

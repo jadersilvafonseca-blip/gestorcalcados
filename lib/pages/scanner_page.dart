@@ -3,23 +3,17 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:hive/hive.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-import '../services/hive_service.dart';
-import '../models/ticket.dart';
-import '../models/sector_models.dart'; // Importa o modelo oficial de setores
-
-/// Boxes auxiliares
-const String kMovementsBox = 'movements_box';
-const String kSectorDailyBox = 'sector_daily';
+import '../services/production_manager.dart';
+import '../models/sector_models.dart';
 
 class ScannerPage extends StatefulWidget {
   final String sectorId; // ID do setor (ex: 'banca 1')
 
   const ScannerPage({
     super.key,
-    required this.sectorId, // Agora é obrigatório
+    required this.sectorId, // Obrigatório
   });
 
   @override
@@ -37,17 +31,6 @@ class _ScannerPageState extends State<ScannerPage> {
   void initState() {
     super.initState();
     _sector = widget.sectorId;
-    _prepareBoxes();
-  }
-
-  Future<void> _prepareBoxes() async {
-    await HiveService.init();
-    if (!Hive.isBoxOpen(kMovementsBox)) {
-      await Hive.openBox(kMovementsBox);
-    }
-    if (!Hive.isBoxOpen(kSectorDailyBox)) {
-      await Hive.openBox(kSectorDailyBox);
-    }
   }
 
   @override
@@ -101,152 +84,32 @@ class _ScannerPageState extends State<ScannerPage> {
     return null;
   }
 
-  // -------------------- HIVE HELPERS --------------------
-  Box get _movBox => Hive.box(kMovementsBox);
-  Box get _dailyBox => Hive.box(kSectorDailyBox);
-
-  String _openKey(String ticketId) => 'open::$ticketId::$_sector';
-  String _histKey(String ticketId) => 'hist::$ticketId';
-  String _prodKey(String dateYmd) => '$_sector::$dateYmd';
-  String _ymd(DateTime d) =>
-      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-
-  Future<void> _ensureTicketExists(Map<String, dynamic> p) async {
-    final all = HiveService.getAllTickets();
-    final exists = all.any((e) {
-      return e.id == p['id'];
-    });
-
-    if (!exists) {
-      final t = Ticket(
-        id: p['id'],
-        cliente: '',
-        modelo: (p['modelo'] ?? '').toString(),
-        marca: (p['marca'] ?? '').toString(),
-        cor: (p['cor'] ?? '').toString(),
-        pairs: p['pairs'] as int,
-        grade: <String, int>{},
-        observacao: '',
-        pedido: '',
-      );
-      // Envolve a adição em try/catch para segurança
-      try {
-        await HiveService.addTicket(t);
-      } catch (e) {
-        // Se falhar ao adicionar, pelo menos avisa
-        _snack('Erro ao salvar nova ficha: ${e.toString()}');
-      }
-    }
-  }
-
-  // --------------------------------------------------------------------
-  // FUNÇÃO _darEntrada (TORNADA MAIS SEGURA com try/catch)
-  // --------------------------------------------------------------------
+  // -------------------- ENTRADA / SAÍDA --------------------
   Future<bool> _darEntrada(Map<String, dynamic> p) async {
     try {
-      await _ensureTicketExists(p);
-      final ticketId = p['id'].toString();
-
-      // 1. Procura por esta ficha aberta em QUALQUER setor
-      String? setorAberto;
-      for (final k in _movBox.keys) {
-        if (k is String && k.startsWith('open::$ticketId::')) {
-          final parts = k.split('::');
-          if (parts.length == 3) {
-            setorAberto = parts[2];
-            break;
-          }
-        }
-      }
-
-      if (setorAberto != null) {
-        if (setorAberto == _sector) {
-          _snack('Esta ficha já está em processo neste setor.');
-        } else {
-          final labelSetorAberto =
-              sectorFromFirestoreId(setorAberto)?.label ?? setorAberto;
-          _snack(
-              'ERRO: Ficha ainda está aberta no setor [$labelSetorAberto]. Dê saída por lá primeiro.');
-        }
-        return false;
-      }
-
-      // 3. (REGRA) Verifica se a ficha já saiu DESTE setor (no histórico)
-      final hk = _histKey(ticketId);
-      final hist = (_movBox.get(hk) as List?)?.cast<Map<String, dynamic>>() ??
-          <Map<String, dynamic>>[];
-
-      final bool jaSaiuDesteSetor = hist.any((mov) {
-        return mov.containsKey('sector') && mov['sector'] == _sector;
-      });
-
-      if (jaSaiuDesteSetor) {
-        _snack(
-            'ERRO: Ficha $ticketId já foi finalizada neste setor e não pode entrar novamente.');
-        return false;
-      }
-
-      // 4. Se passou, pode dar entrada (operação crítica):
-      final key = _openKey(ticketId);
-      await _movBox.put(key, {
-        'ticketId': ticketId,
-        'sector': _sector,
-        'pairs': p['pairs'],
-        'inAt': DateTime.now().toIso8601String(),
-      });
-
-      _snack('Ficha $ticketId: Entrada com sucesso.');
-      return true; // Sucesso
+      final result =
+          await ProductionManager().entrada(ticketData: p, sectorId: _sector);
+      _snack(result
+          ? 'Ficha ${p['id']}: Entrada com sucesso.'
+          : 'Erro: não foi possível dar entrada.');
+      return result;
     } catch (e) {
       _snack('ERRO ao dar entrada: ${e.toString()}');
-      return false; // Falha
+      return false;
     }
   }
 
-  // --------------------------------------------------------------------
-  // FUNÇÃO _darSaidaOuFinalizar (TORNADA MAIS SEGURA com try/catch)
-  // --------------------------------------------------------------------
   Future<bool> _darSaidaOuFinalizar(Map<String, dynamic> p) async {
     try {
-      final key = _openKey(p['id']);
-      final open = _movBox.get(key);
-
-      if (open == null) {
-        _snack('Nenhuma entrada aberta desta ficha neste setor.');
-        return false; // Falha esperada
-      }
-
-      // --- Início das Operações Críticas ---
-
-      // 1. Prepara dados
-      final outAt = DateTime.now();
-      final movClosed = Map<String, dynamic>.from(open);
-      movClosed['outAt'] = outAt.toIso8601String();
-
-      // 2. Salva no histórico
-      final hk = _histKey(p['id']);
-      final hist = (_movBox.get(hk) as List?)?.cast<Map<String, dynamic>>() ??
-          <Map<String, dynamic>>[];
-      hist.add(movClosed);
-      await _movBox.put(hk, hist);
-
-      // 3. Remove o "aberto"
-      await _movBox.delete(key);
-
-      // 4. Soma produção diária
-      final ymd = _ymd(outAt);
-      final pk = _prodKey(ymd);
-      final current = (_dailyBox.get(pk) as int?) ?? 0;
-      final produced = (open['pairs'] as int?) ?? (p['pairs'] as int);
-      await _dailyBox.put(pk, current + produced);
-
-      // --- Fim das Operações Críticas ---
-
-      _snack('Ficha ${p['id']}: Saída com sucesso.');
-      return true; // Sucesso
+      final result =
+          await ProductionManager().saida(ticketData: p, sectorId: _sector);
+      _snack(result
+          ? 'Ficha ${p['id']}: Saída com sucesso.'
+          : 'Erro: não foi possível dar saída.');
+      return result;
     } catch (e) {
       _snack('ERRO ao dar saída: ${e.toString()}');
-      return false; // Falha
+      return false;
     }
   }
 
@@ -266,7 +129,6 @@ class _ScannerPageState extends State<ScannerPage> {
   // -------------------- SCAN HANDLER --------------------
   Future<void> _handleScan(String raw) async {
     if (_handling) return;
-
     setState(() => _handling = true);
 
     final parsed = _parseQr(raw);
@@ -274,24 +136,13 @@ class _ScannerPageState extends State<ScannerPage> {
       _lastParsed = parsed;
     });
 
-    // --- Caso 1: QR Inválido ---
     if (parsed == null) {
       _snack('QR inválido. Formato esperado: TK|id|modelo|cor|marca|total');
-      setState(() => _handling = false); // Libera para nova tentativa
-      return; // <-- Não fecha a tela
-    }
-
-    // --- Caso 2: QR Válido ---
-    final currentSectorLabel = sectorFromFirestoreId(_sector)?.label ?? _sector;
-    final ticketId = parsed['id'].toString();
-    final key = _openKey(ticketId);
-    final openMovement = _movBox.get(key);
-    final bool isInThisSector = openMovement != null;
-
-    if (!mounted) {
       setState(() => _handling = false);
       return;
     }
+
+    final currentSectorLabel = sectorFromFirestoreId(_sector)?.label ?? _sector;
 
     // Mostra o popup
     final action = await showModalBottomSheet<String>(
@@ -302,21 +153,18 @@ class _ScannerPageState extends State<ScannerPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (isInThisSector)
-              ListTile(
-                leading:
-                    const Icon(Icons.logout, color: Colors.green, size: 32),
-                title: const Text('Finalizar e Dar SAÍDA'),
-                subtitle: Text('Registra a produção ($currentSectorLabel)'),
-                onTap: () => Navigator.pop(c, 'saida'),
-              )
-            else
-              ListTile(
-                leading: const Icon(Icons.login, color: Colors.blue, size: 32),
-                title: const Text('Dar ENTRADA'),
-                subtitle: Text('Setor: $currentSectorLabel'),
-                onTap: () => Navigator.pop(c, 'entrada'),
-              ),
+            ListTile(
+              leading: const Icon(Icons.login, color: Colors.blue, size: 32),
+              title: const Text('Dar ENTRADA'),
+              subtitle: Text('Setor: $currentSectorLabel'),
+              onTap: () => Navigator.pop(c, 'entrada'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.green, size: 32),
+              title: const Text('Finalizar e Dar SAÍDA'),
+              subtitle: Text('Registra a produção ($currentSectorLabel)'),
+              onTap: () => Navigator.pop(c, 'saida'),
+            ),
             const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.cancel_outlined, color: Colors.red),
@@ -329,33 +177,28 @@ class _ScannerPageState extends State<ScannerPage> {
       ),
     );
 
-    // --- Processa a Ação ---
     try {
       if (action == 'entrada') {
         await _darEntrada(parsed);
       } else if (action == 'saida') {
         await _darSaidaOuFinalizar(parsed);
-      } else if (action == null) {
+      } else {
         _snack('Cancelado.');
       }
     } catch (e) {
       _snack('ERRO CRÍTICO: ${e.toString()}');
     } finally {
-      // Damos um delay mínimo para o usuário ler o snack
       await Future.delayed(const Duration(milliseconds: 100));
-
       if (mounted) {
-        Navigator.pop(context); // Fecha a tela do scanner
+        Navigator.pop(context); // Fecha scanner
       }
+      setState(() => _handling = false);
     }
   }
 
   // -------------------- UI --------------------
   @override
   Widget build(BuildContext context) {
-    final movementsReady = Hive.isBoxOpen(kMovementsBox);
-    final dailyReady = Hive.isBoxOpen(kSectorDailyBox);
-
     final currentSectorLabel = sectorFromFirestoreId(_sector)?.label ?? _sector;
 
     return Scaffold(
@@ -404,25 +247,15 @@ class _ScannerPageState extends State<ScannerPage> {
           ),
           if (_lastParsed != null)
             _LastScanCard(data: _lastParsed!, sectorLabel: currentSectorLabel),
-          if (!(movementsReady && dailyReady))
-            const Padding(
-              padding: EdgeInsets.all(12.0),
-              child: Text(
-                'Inicializando armazenamento local...',
-                style: TextStyle(color: Colors.orange),
-              ),
-            ),
         ],
       ),
     );
   }
 }
 
-//
 // ====================================================================
-// <<< CLASSE _LastScanCard CORRIGIDA E COMPLETA >>>
+// <<< CLASSE _LastScanCard >>> (UI do último scan)
 // ====================================================================
-//
 class _LastScanCard extends StatelessWidget {
   final Map<String, dynamic> data;
   final String sectorLabel;
@@ -460,17 +293,15 @@ class _LastScanCard extends StatelessWidget {
                       if (cor.isNotEmpty) Text('Cor: $cor'),
                       if (marca.isNotEmpty) Text('Marca: $marca'),
                       Text('Pares: $pairs'),
-                      Text(
-                        'Setor: ${sectorLabel.toUpperCase()}',
-                      ),
+                      Text('Setor: ${sectorLabel.toUpperCase()}'),
                     ],
-                  ), // Fecha o Wrap
-                ], // Fecha o children do Column
-              ), // Fecha o Column
-            ), // Fecha o Expanded
-          ], // Fecha o children do Row
-        ), // Fecha o Padding
-      ), // Fecha o Card
-    ); // Fecha o return
-  } // Fecha o método build
-} // Fecha a classe _LastScanCard
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

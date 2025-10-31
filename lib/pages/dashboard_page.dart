@@ -9,15 +9,19 @@ import 'tickets_page.dart';
 import 'scanner_page.dart';
 import 'product_form_page.dart';
 import 'product_list_page.dart';
+import 'report_page.dart'; // <-- 1. IMPORT ADICIONADO
 
 // Import do modelo oficial
 import '../models/sector_models.dart';
+
+// Import do ProductionManager (integração Hive + regras)
+import '../services/production_manager.dart';
 
 // Boxes usadas pelo scanner / produção
 const String kMovementsBox = 'movements_box';
 const String kSectorDailyBox = 'sector_daily';
 
-// ---------- Utils ----------
+// ---------- Utils (com espaços corrigidos) ----------
 String _ymd(DateTime d) =>
     '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
@@ -26,7 +30,7 @@ int _getProductionToday(Box dailyBox, String sectorFirestoreId) {
   return (dailyBox.get(key) as int?) ?? 0;
 }
 
-// Lógica de "Em Produção" somando PARES
+// Lógica de "Em Produção" somando PARES (fallback - com espaços corrigidos)
 int _getInProcessNow(Box movBox, String sectorFirestoreId) {
   int totalPares = 0;
   for (final k in movBox.keys) {
@@ -66,6 +70,17 @@ class _DashboardPageState extends State<DashboardPage> {
     if (!Hive.isBoxOpen(kSectorDailyBox)) {
       await Hive.openBox(kSectorDailyBox);
     }
+
+    try {
+      // 2. CORREÇÃO: Usar ProductionManager.instance
+      await ProductionManager.instance.initHiveBoxes(
+        eventsBox: Hive.box(kMovementsBox),
+        countersBox: Hive.box(kSectorDailyBox),
+      );
+    } catch (e) {
+      // print('ProductionManager init failed: $e');
+    }
+
     if (mounted) {
       setState(() => _ready = true);
     }
@@ -90,8 +105,6 @@ class _DashboardPageState extends State<DashboardPage> {
                 'Menu Principal', // Título Mantido
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                       fontWeight: FontWeight.bold,
-                      // Você pode adicionar uma cor se quiser:
-                      // color: Color(0xFF223147),
                     ),
               ),
             ),
@@ -120,6 +133,20 @@ class _DashboardPageState extends State<DashboardPage> {
                 ));
               },
             ),
+
+            // --- 3. BOTÃO DE RELATÓRIO ADICIONADO ---
+            ListTile(
+              leading: const Icon(Icons.assessment_outlined),
+              title: const Text('Relatório de Produção'),
+              onTap: () {
+                Navigator.pop(context); // Fecha o Drawer
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const ReportPage(),
+                ));
+              },
+            ),
+            // --- FIM DA ADIÇÃO ---
+
             ListTile(
               leading: const Icon(Icons.add_box_outlined),
               title: const Text('Cadastrar Novo Produto'),
@@ -164,7 +191,6 @@ class _DashboardPageState extends State<DashboardPage> {
 }
 
 // O restante do código (_DashboardBody, _ResumoGeral, _SectorTile, _SectorDetailShell)
-// permanece EXATAMENTE IGUAL ao último. Cole a partir daqui...
 class _DashboardBody extends StatelessWidget {
   final Box dailyBox;
   final Box movBox;
@@ -182,8 +208,18 @@ class _DashboardBody extends StatelessWidget {
       animation: merged,
       builder: (context, _) {
         final tiles = Sector.values.map((s) {
-          final producaoDia = _getProductionToday(dailyBox, s.firestoreId);
-          final emProducao = _getInProcessNow(movBox, s.firestoreId);
+          // 2. CORREÇÃO: Usar ProductionManager.instance
+          final pm = ProductionManager.instance;
+          int producaoDia;
+          int emProducao;
+          try {
+            producaoDia = pm.getProducaoDoDia(s.firestoreId);
+            emProducao = pm.getFichasEmProducao(s.firestoreId);
+          } catch (_) {
+            // fallback para o comportamento anterior caso PM não esteja inicializado
+            producaoDia = _getProductionToday(dailyBox, s.firestoreId);
+            emProducao = _getInProcessNow(movBox, s.firestoreId);
+          }
 
           return _SectorTile(
             icon: s.icon,
@@ -201,8 +237,9 @@ class _DashboardBody extends StatelessWidget {
         }).toList();
 
         // Total da Montagem
-        final totalHoje =
-            _getProductionToday(dailyBox, Sector.montagem.firestoreId);
+        // 2. CORREÇÃO: Usar ProductionManager.instance
+        final totalHoje = ProductionManager.instance
+            .getProducaoDoDia(Sector.montagem.firestoreId);
 
         return Column(
           children: [
@@ -236,7 +273,7 @@ class _DashboardBody extends StatelessWidget {
   }
 }
 
-// ---------- Widgets do dashboard ----------
+// ---------- Widgets do dashboard (com espaços corrigidos) ----------
 class _ResumoGeral extends StatelessWidget {
   final int totalHoje;
   const _ResumoGeral({required this.totalHoje});
@@ -369,7 +406,7 @@ class _SectorTile extends StatelessWidget {
   }
 }
 
-// ---------- Detalhe simples interno (com histórico completo) ----------
+// ---------- Detalhe simples interno (com espaços corrigidos) ----------
 class _SectorDetailShell extends StatelessWidget {
   final Sector sector;
   const _SectorDetailShell({required this.sector});
@@ -394,23 +431,34 @@ class _SectorDetailShell extends StatelessWidget {
 
     // --- Funções locais ---
     int producaoDia() {
-      final key = '${sector.firestoreId}::${_ymd(DateTime.now())}';
-      return (daily.get(key) as int?) ?? 0;
+      try {
+        // 2. CORREÇÃO: Usar ProductionManager.instance
+        return ProductionManager.instance.getProducaoDoDia(sector.firestoreId);
+      } catch (_) {
+        final key = '${sector.firestoreId}::${_ymd(DateTime.now())}';
+        return (daily.get(key) as int?) ?? 0;
+      }
     }
 
     int emProducaoSomaPares() {
-      int totalPares = 0;
-      for (final k in movs.keys) {
-        if (k is String &&
-            k.startsWith('open::') &&
-            k.endsWith('::${sector.firestoreId}')) {
-          final movement = movs.get(k) as Map?;
-          if (movement != null) {
-            totalPares += (movement['pairs'] as int?) ?? 0;
+      try {
+        // 2. CORREÇÃO: Usar ProductionManager.instance
+        return ProductionManager.instance
+            .getFichasEmProducao(sector.firestoreId);
+      } catch (_) {
+        int totalPares = 0;
+        for (final k in movs.keys) {
+          if (k is String &&
+              k.startsWith('open::') &&
+              k.endsWith('::${sector.firestoreId}')) {
+            final movement = movs.get(k) as Map?;
+            if (movement != null) {
+              totalPares += (movement['pairs'] as int?) ?? 0;
+            }
           }
         }
+        return totalPares;
       }
-      return totalPares;
     }
 
     List<Map> _getFichasAbertas() {
