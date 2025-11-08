@@ -1,5 +1,4 @@
-﻿// lib/main.dart
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter_localizations/flutter_localizations.dart'; // <-- 1. IMPORT ADICIONADO
 
@@ -11,6 +10,7 @@ import 'pages/create_ticket_page.dart';
 import 'services/hive_service.dart';
 import 'data/adapters.dart';
 import 'data/stats_repository.dart';
+import 'data/material_repository.dart'; // <-- NOVO IMPORT
 
 // Gerenciador de produção
 import 'services/production_manager.dart';
@@ -18,6 +18,10 @@ import 'services/production_manager.dart';
 // Constantes de boxes
 const String kMovementsBox = 'movements_box';
 const String kSectorDailyBox = 'sector_daily';
+// --- ADICIONADO PARA GARGALOS ---
+const String kBottlenecksActiveBox = 'bottlenecks_active_box';
+const String kBottlenecksHistoryBox = 'bottlenecks_history_box';
+// ---------------------------------
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,6 +35,12 @@ Future<void> main() async {
   // 3. Inicializa os serviços e repositórios
   await HiveService.init();
   await StatsRepository().init();
+  await MaterialRepository().init(); // <-- NOVA INICIALIZAÇÃO
+
+  // --- ADICIONADO: Abrir boxes de gargalo ---
+  await Hive.openBox<dynamic>(kBottlenecksActiveBox);
+  await Hive.openBox<dynamic>(kBottlenecksHistoryBox);
+  // ------------------------------------------
 
   // 4. Inicializa o ProductionManager com as boxes já abertas
   final movementsBox = await Hive.openBox<dynamic>(kMovementsBox);

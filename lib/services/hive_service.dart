@@ -4,13 +4,20 @@ import 'package:hive/hive.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:gestor_calcados_new/models/ticket.dart';
 
+// Não precisamos mais de imports de material_item aqui!
+// --------------------------------------------------------
+
 class HiveService {
   static const String _boxName = 'tickets_box';
   static bool _initialized = false;
 
+  // Função limpa: não tenta registrar adaptadores de outros arquivos
   static Future<void> init() async {
     if (_initialized && Hive.isBoxOpen(_boxName)) return;
+
     await Hive.initFlutter();
+
+    // Abre a caixa de tickets
     if (!Hive.isBoxOpen(_boxName)) {
       await Hive.openBox(_boxName);
     }
@@ -20,6 +27,8 @@ class HiveService {
 
   static bool get isReady => _initialized && Hive.isBoxOpen(_boxName);
   static Box? get _box => Hive.isBoxOpen(_boxName) ? Hive.box(_boxName) : null;
+
+  // ... (Resto do código do HiveService é mantido) ...
 
   static ValueListenable<Box>? listenable() => _box?.listenable();
 

@@ -1,21 +1,13 @@
-// lib/pages/create_ticket_page.dart (CORRIGIDO)
-
+// lib/pages/create_ticket_page.dart
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import 'package:printing/printing.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:barcode/barcode.dart';
-
-import 'dart:convert'; // <<< CORREÇÃO 1: Importar o conversor JSON
-
 import 'package:gestor_calcados_new/models/product.dart';
 import 'package:gestor_calcados_new/data/product_repository.dart';
 import 'package:gestor_calcados_new/services/hive_service.dart';
 import 'package:gestor_calcados_new/models/ticket.dart';
+import 'package:gestor_calcados_new/services/material_repository.dart';
 
 class CreateTicketPage extends StatefulWidget {
   final Ticket? ticketToEdit;
-
   const CreateTicketPage({super.key, this.ticketToEdit});
 
   @override
@@ -25,10 +17,10 @@ class CreateTicketPage extends StatefulWidget {
 class _CreateTicketPageState extends State<CreateTicketPage> {
   final _clienteCtrl = TextEditingController();
   final _pedidoCtrl = TextEditingController();
-  final _corCtrl = TextEditingController();
   final _obsCtrl = TextEditingController();
 
   final repo = ProductRepository();
+  final _materialRepo = MaterialRepository();
   List<Product> _products = [];
   Product? _selected;
   bool _loading = true;
@@ -48,12 +40,16 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
   Future<void> _loadProducts() async {
     await HiveService.init();
     await repo.init();
+    await _materialRepo.init();
+
     final list = repo.getAll();
 
     Product? initialProduct;
     if (widget.ticketToEdit != null) {
       initialProduct = list.firstWhereOrNull(
-        (p) => p.name == widget.ticketToEdit!.modelo,
+        (p) =>
+            p.name == widget.ticketToEdit!.modelo &&
+            p.color == widget.ticketToEdit!.cor,
       );
     }
 
@@ -71,7 +67,6 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
   void _fillFields(Ticket t) {
     _clienteCtrl.text = t.cliente;
     _pedidoCtrl.text = t.pedido;
-    _corCtrl.text = t.cor;
     _obsCtrl.text = t.observacao;
 
     t.grade.forEach((key, value) {
@@ -85,7 +80,6 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
   void dispose() {
     _clienteCtrl.dispose();
     _pedidoCtrl.dispose();
-    _corCtrl.dispose();
     _obsCtrl.dispose();
     for (var ctrl in _gradeCtrls.values) {
       ctrl.dispose();
@@ -100,14 +94,6 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
     }
     return total;
   }
-
-  List<MaterialEstimate> get _estimates {
-    if (_selected == null) return [];
-    return _selected!.estimateMaterialsReadable(totalPares);
-  }
-
-  String _formatMeters(double v) =>
-      v >= 1 ? '${v.toStringAsFixed(2)} m' : '${v.toStringAsFixed(3)} m';
 
   bool _validateInput() {
     if (_selected == null) {
@@ -125,221 +111,89 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
     return true;
   }
 
+  Future<String> _generateNextTicketId() async {
+    final currentYear = DateTime.now().year.toString();
+    final allTickets = HiveService.getAllTickets();
+    final ticketsThisYear = allTickets.where((ticket) {
+      final parts = ticket.id.split('-');
+      if (parts.length != 2) return false;
+      final yearStr = parts[0];
+      return yearStr == currentYear;
+    }).toList();
+    int maxNumber = 0;
+    for (final ticket in ticketsThisYear) {
+      final parts = ticket.id.split('-');
+      final numberStr = parts[1];
+      final number = int.tryParse(numberStr);
+      if (number != null && number > maxNumber) {
+        maxNumber = number;
+      }
+    }
+    final nextNumber = maxNumber + 1;
+    final nextNumberFormatted = nextNumber.toString().padLeft(3, '0');
+    return '$currentYear-$nextNumberFormatted';
+  }
+
   Future<void> _createOrUpdateTicket(String ticketId) async {
+    // 1. O cálculo é feito aqui
+    final List<MaterialEstimate> consumption =
+        _selected!.estimateMaterialsReadable(totalPares, _materialRepo);
+
     final t = Ticket(
       id: _isEditing ? widget.ticketToEdit!.id : ticketId,
       cliente: _clienteCtrl.text,
       pedido: _pedidoCtrl.text,
       modelo: _selected!.name,
       marca: _selected!.brand,
-      cor: _corCtrl.text,
+      cor: _selected!.color,
       pairs: totalPares,
       grade: {
         for (var n = 34; n <= 43; n++)
           '$n': int.tryParse(_gradeCtrls['$n']!.text) ?? 0
       },
       observacao: _obsCtrl.text,
+
+      // --- CORREÇÃO AQUI ---
+      // Esta linha estava comentada. Agora está ATIVA.
+      materialsUsed: consumption,
+      // --- FIM DA CORREÇÃO ---
     );
     await HiveService.addTicket(t);
+  }
+
+  void _clearAllFields() {
+    _clienteCtrl.clear();
+    _pedidoCtrl.clear();
+    _obsCtrl.clear();
+    for (var ctrl in _gradeCtrls.values) {
+      ctrl.clear();
+    }
+    setState(() {});
   }
 
   Future<void> _onSaveTicketOnly() async {
     if (!_validateInput()) return;
 
-    final ticketId = _isEditing
-        ? widget.ticketToEdit!.id
-        : 'F-${DateTime.now().millisecondsSinceEpoch}';
+    final ticketId =
+        _isEditing ? widget.ticketToEdit!.id : await _generateNextTicketId();
+
+    setState(() => _loading = true);
 
     await _createOrUpdateTicket(ticketId);
 
     if (mounted) {
-      Navigator.of(context).pop(true);
-    }
-  }
-
-  //
-  // ====================================================================
-  // <<< CORREÇÃO 2: Alteração na função de gerar o PDF >>>
-  // ====================================================================
-  //
-  Future<void> _onGeneratePdf() async {
-    if (!_validateInput()) return;
-
-    final ticketId = _isEditing
-        ? widget.ticketToEdit!.id
-        : 'F-${DateTime.now().millisecondsSinceEpoch}';
-
-    final now = DateTime.now();
-    final df = DateFormat('dd/MM/yyyy HH:mm');
-
-    await _createOrUpdateTicket(ticketId);
-
-    // Mapeia os dados para o formato JSON que o scanner ESPERA
-    final qrData = {
-      'id': ticketId, // <--- MUDADO (era 'ficha')
-      'modelo': _selected!.name,
-      'marca': _selected!.brand,
-      'cor': _corCtrl.text.trim(),
-      'pairs': totalPares // <--- MUDADO (era 'pares', o scanner espera 'pairs')
-    };
-
-    final bc = Barcode.qrCode();
-    // Converte o Map para uma string JSON VÁLIDA
-    final qrJsonString = json.encode(qrData);
-
-    final qrSvg = bc.toSvg(qrJsonString, width: 180, height: 180);
-    // ====================================================================
-    // <<< FIM DA CORREÇÃO >>>
-    // ====================================================================
-
-    final pdf = pw.Document();
-
-    // Adicionar página PDF (lógica original)
-    pdf.addPage(
-      pw.MultiPage(
-        margin: const pw.EdgeInsets.all(18),
-        build: (ctx) => [
-          // Cabeçalho
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Text('FICHA DE PRODUÇÃO',
-                      style: pw.TextStyle(
-                          fontSize: 20, fontWeight: pw.FontWeight.bold)),
-                  pw.SizedBox(height: 4),
-                  // Cliente e Pedido
-                  pw.Text(
-                      'Cliente: ${_clienteCtrl.text.isEmpty ? "-" : _clienteCtrl.text}',
-                      style: const pw.TextStyle(fontSize: 12)),
-                  pw.Text(
-                      'Pedido: ${_pedidoCtrl.text.isEmpty ? "-" : _pedidoCtrl.text}',
-                      style: const pw.TextStyle(fontSize: 12)),
-                  pw.SizedBox(height: 6),
-                  pw.Text('Nº: $ticketId',
-                      style: pw.TextStyle(
-                          fontSize: 12, fontWeight: pw.FontWeight.bold)),
-                  pw.Text('Data: ${df.format(now)}',
-                      style: const pw.TextStyle(fontSize: 10)),
-                ],
-              ),
-              pw.Container(
-                  width: 120, height: 120, child: pw.SvgImage(svg: qrSvg)),
-            ],
+      if (_isEditing) {
+        Navigator.of(context).pop(true);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ficha $ticketId salva com sucesso!'),
+            backgroundColor: Colors.green[700],
           ),
-          pw.SizedBox(height: 10),
-
-          // Informações do Produto (Modelo, Cor, Marca)
-          pw.Container(
-            padding: const pw.EdgeInsets.all(6),
-            decoration: pw.BoxDecoration(border: pw.Border.all(width: 0.6)),
-            child: pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              children: [
-                pw.Text('MODELO: ${_selected!.name}',
-                    style: const pw.TextStyle(fontSize: 12)),
-                pw.Text('COR: ${_corCtrl.text.isEmpty ? "-" : _corCtrl.text}',
-                    style: const pw.TextStyle(fontSize: 12)),
-                pw.Text('MARCA: ${_selected!.brand}',
-                    style: const pw.TextStyle(fontSize: 12)),
-              ],
-            ),
-          ),
-
-          pw.SizedBox(height: 10),
-
-          // Grade de Produção e Total de Pares na mesma linha
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              pw.Text('GRADE DE PRODUÇÃO',
-                  style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-              pw.Text('Total de pares: $totalPares',
-                  style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-            ],
-          ),
-          pw.SizedBox(height: 6),
-          pw.Table(
-            border: pw.TableBorder.all(width: 0.5),
-            children: [
-              pw.TableRow(
-                children: [
-                  for (var n = 34; n <= 43; n++)
-                    pw.Padding(
-                        padding: const pw.EdgeInsets.all(4),
-                        child: pw.Center(
-                            child: pw.Text('$n',
-                                style: pw.TextStyle(
-                                    fontWeight: pw.FontWeight.bold)))),
-                ],
-              ),
-              pw.TableRow(
-                children: [
-                  for (var n = 34; n <= 43; n++)
-                    () {
-                      final text = _gradeCtrls['$n']?.text ?? '';
-                      final pdfText = text.isEmpty ? '0' : text;
-                      return pw.Padding(
-                        padding: const pw.EdgeInsets.all(4),
-                        child: pw.Center(
-                          child: pw.Text(pdfText, style: const pw.TextStyle()),
-                        ),
-                      );
-                    }(),
-                ],
-              ),
-            ],
-          ),
-
-          if (_obsCtrl.text.isNotEmpty) ...[
-            pw.SizedBox(height: 10),
-            pw.Text('OBSERVAÇÕES:',
-                style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-            pw.Text(_obsCtrl.text, style: const pw.TextStyle()),
-          ],
-
-          pw.SizedBox(height: 10),
-          pw.Text('CONSUMO DE MATERIAIS',
-              style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 4),
-          pw.Container(
-            decoration: pw.BoxDecoration(border: pw.Border.all(width: 0.5)),
-            child: pw.Column(
-              children: (_estimates).map((e) {
-                return pw.Padding(
-                  padding: const pw.EdgeInsets.all(4),
-                  child: pw.Row(
-                    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                    children: [
-                      pw.Text(
-                          '${e.material} ${e.color.isNotEmpty ? "(${e.color})" : ""}',
-                          style: const pw.TextStyle(fontSize: 11)),
-                      pw.Text(_formatMeters(e.meters),
-                          style: pw.TextStyle(
-                              fontWeight: pw.FontWeight.bold, fontSize: 11)),
-                    ],
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-
-          pw.SizedBox(height: 12),
-          pw.Text('Gerado em ${df.format(now)}',
-              style: const pw.TextStyle(fontSize: 9)),
-        ],
-      ),
-    );
-
-    final bytes = await pdf.save();
-
-    await Printing.layoutPdf(onLayout: (_) => bytes);
-
-    if (mounted) {
-      Navigator.of(context).pop(true);
+        );
+        _clearAllFields();
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -364,7 +218,8 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
                     items: _products
                         .map((p) => DropdownMenuItem(
                               value: p,
-                              child: Text('${p.name} (${p.brand})'),
+                              child: Text(
+                                  '${p.name} (${p.color.isNotEmpty ? p.color : 'S/ Cor'})'),
                             ))
                         .toList(),
                     onChanged: _isEditing
@@ -376,10 +231,6 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
                           ? 'Modelo não pode ser alterado na edição'
                           : null,
                     ),
-                  ),
-                  TextField(
-                    controller: _corCtrl,
-                    decoration: const InputDecoration(labelText: 'Cor'),
                   ),
                   TextField(
                     controller: _clienteCtrl,
@@ -418,28 +269,18 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
                   const SizedBox(height: 10),
                   Text('Total de pares: $totalPares',
                       style: const TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: isReady ? _onSaveTicketOnly : null,
-                          icon: const Icon(Icons.save),
-                          label: Text(_isEditing
-                              ? 'Salvar Alterações'
-                              : 'Salvar Ficha'),
-                        ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: FilledButton.icon(
+                      onPressed: isReady ? _onSaveTicketOnly : null,
+                      icon: const Icon(Icons.save),
+                      label: Text(
+                        _isEditing ? 'Salvar Alterações' : 'Salvar Ficha',
+                        style: const TextStyle(fontSize: 16),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: isReady ? _onGeneratePdf : null,
-                          icon: const Icon(Icons.picture_as_pdf),
-                          label: const Text('Gerar PDF'),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ],
               ),
@@ -448,7 +289,7 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
   }
 }
 
-// Extensão auxiliar para a busca do produto
+// Extensão auxiliar
 extension IterableExt<T> on Iterable<T> {
   T? firstWhereOrNull(bool Function(T) test) {
     for (final element in this) {

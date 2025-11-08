@@ -15,16 +15,16 @@ dependencies:
 
   # Utilidades
   # === CORRIGIDO: Versão do intl exigida pelo flutter_localizations ===
-  intl: ^0.20.2 
+  intl: ^0.20.2
   # === FIM DA CORREÇÃO ===
-  path_provider: ^2.1.3
+  path_provider: ^2.1.5
 
   # Scanner de código
   mobile_scanner: ^5.1.1 # Mantendo versão atualizada
 
   # PDF / impressão / código de barras
-  pdf: ^3.11.0
-  printing: ^5.12.0
+  pdf: ^3.11.3
+  printing: ^5.14.2
   barcode: ^2.2.8
 
   # Banco local (Hive)
@@ -34,6 +34,8 @@ dependencies:
   # Fontes
   google_fonts: ^6.2.1
   timezone: ^0.10.1
+  file_picker: ^10.3.3
+  share_plus: ^12.0.1
 
 dev_dependencies:
   flutter_test:
@@ -41,9 +43,30 @@ dev_dependencies:
   flutter_lints: ^4.0.0 # Manteve a sua versão
 
   # Dependências para Geração de Código Hive
-  build_runner: ^2.4.10 
-  hive_generator: ^2.0.1 
+  build_runner: ^2.4.10
+  hive_generator: ^2.0.1
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
 
+  # 1. Diz ao Flutter para incluir a pasta do logo no app
+  assets:
+    - logo/
+
+# 2. Configuração do GERADOR DE ÍCONES
+# (Alinhado no início, SEM espaços)
+flutter_launcher_icons:
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  
+  # --- ESTA É A CORREÇÃO ---
+  # Adicionado o ".png" no final do nome do arquivo
+  image_path: "logo/logo_png.png"
+  # ... (sua configuração do flutter_launcher_icons) ...
+
+# Configuração do NOME DO APP
+flutter_app_name:
+  name: "Minha Produção" # <-- COLOQUE O NOME QUE VOCÊ QUER AQUI
+  # --- FIM DA CORREÇÃO ---

@@ -1,5 +1,7 @@
-// lib/models/sector_models.dart
 import 'package:flutter/material.dart';
+
+// O ID do setor "Em Trânsito" precisa ser público para ser usado no dashboard
+const String kTransitSectorId = 'transito';
 
 /// ORDEM OFICIAL (controla a ordem do grid):
 /// almoxarifado, corte, pesponto, banca 1, banca 2, montagem, expedição
@@ -65,13 +67,34 @@ extension SectorUi on Sector {
         return Icons.straighten_outlined; // “costura”
       case Sector.banca1:
       case Sector.banca2:
-        return Icons.precision_manufacturing_outlined;
+        return Icons.straighten_outlined; // “costura” (Já estava assim)
       case Sector.montagem:
         return Icons.layers_outlined; // “camadas/sola”
       case Sector.expedicao:
         return Icons.local_shipping_outlined;
     }
   }
+
+  // --- ALTERADO: Cores mais escuras e confortáveis ---
+  Color get color {
+    switch (this) {
+      case Sector.almoxarifado:
+        return const Color(0xFF2C3E50); // Azul Marinho
+      case Sector.corte:
+        return const Color(0xFFB84A00); // Laranja Queimado
+      case Sector.pesponto:
+        return const Color(0xFF00695C); // Verde Petróleo
+      case Sector.banca1:
+        return const Color(0xFF2E7D32); // Verde Escuro
+      case Sector.banca2:
+        return const Color(0xFF1B5E20); // Verde Mais Escuro
+      case Sector.montagem:
+        return const Color(0xFF4A148C); // Roxo Escuro
+      case Sector.expedicao:
+        return const Color(0xFFB71C1C); // Vermelho Escuro
+    }
+  }
+  // --- FIM DA ALTERAÇÃO ---
 }
 
 /// Dado simplificado para exibição (se precisar)

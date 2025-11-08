@@ -1,10 +1,23 @@
-// lib/services/production_manager.dart
 import 'package:hive/hive.dart';
 import '../services/hive_service.dart';
 
 /// Boxes auxiliares
 const String kMovementsBox = 'movements_box';
 const String kSectorDailyBox = 'sector_daily';
+// --- ADICIONADO PARA GARGALOS ---
+const String kBottlenecksActiveBox = 'bottlenecks_active_box';
+const String kBottlenecksHistoryBox = 'bottlenecks_history_box';
+// ---------------------------------
+
+// --- ADICIONADO: Constantes de Motivo de Gargalo ---
+const String kMissingPartReason =
+    'Reposição de peça'; // <-- MUDANÇA: O texto foi corrigido aqui
+const String kOtherReason = 'Outros (especificar)';
+// ------------------------------------------------
+
+// --- ADICIONADO: Constante para "Em Trânsito" ---
+const String kTransitSectorId = 'transito';
+// ---------------------------------------------
 
 class ProductionManager {
   // CORREÇÃO: Usando a instância estática correta (instance)
@@ -15,6 +28,10 @@ class ProductionManager {
   // --- Boxes ---
   late Box<dynamic> _movBox;
   late Box<dynamic> _dailyBox;
+  // --- ADICIONADO PARA GARGALOS ---
+  late Box<dynamic> _activeBottlenecksBox;
+  late Box<dynamic> _historyBottlenecksBox;
+  // ---------------------------------
 
   /// Inicializa as boxes (passadas já abertas)
   Future<void> initHiveBoxes({
@@ -23,6 +40,10 @@ class ProductionManager {
   }) async {
     _movBox = eventsBox;
     _dailyBox = countersBox;
+    // --- ADICIONADO PARA GARGALOS ---
+    _activeBottlenecksBox = Hive.box(kBottlenecksActiveBox);
+    _historyBottlenecksBox = Hive.box(kBottlenecksHistoryBox);
+    // ---------------------------------
   }
 
   String _openKey(String ticketId, String sector) => 'open::$ticketId::$sector';
@@ -33,6 +54,7 @@ class ProductionManager {
 
   // -------------------- FUNÇÕES PRINCIPAIS --------------------
 
+  /// ATUALIZADO: Função de Entrada
   Future<bool> entrada({
     required Map<String, dynamic> ticketData,
     required String sectorId,
@@ -41,16 +63,20 @@ class ProductionManager {
 
     // 1. Verifica se há ticket aberto em outro setor
     String? setorAberto;
+    dynamic openKeyAberto; // Salva a chave para apagar
     for (final k in _movBox.keys) {
       if (k is String && k.startsWith('open::$ticketId::')) {
         final parts = k.split('::');
         if (parts.length == 3) {
           setorAberto = parts[2];
+          openKeyAberto = k; // Salva a chave
           break;
         }
       }
     }
-    if (setorAberto != null) return false;
+
+    // Se estiver aberto em um setor que NÃO É "trânsito", bloqueia.
+    if (setorAberto != null && setorAberto != kTransitSectorId) return false;
 
     // 2. Verifica histórico
     final hk = _histKey(ticketId);
@@ -60,7 +86,12 @@ class ProductionManager {
         .any((mov) => mov.containsKey('sector') && mov['sector'] == sectorId);
     if (jaSaiuDesteSetor) return false;
 
-    // 3. Adiciona a entrada
+    // 3. APAGA o status "Em Trânsito" (se existir)
+    if (setorAberto == kTransitSectorId && openKeyAberto != null) {
+      await _movBox.delete(openKeyAberto);
+    }
+
+    // 4. Adiciona a nova entrada
     await _movBox.put(_openKey(ticketId, sectorId), {
       'ticketId': ticketId,
       'sector': sectorId,
@@ -68,12 +99,13 @@ class ProductionManager {
       'inAt': DateTime.now().toIso8601String(),
     });
 
-    // 4. Garante que o ticket existe
+    // 5. Garante que o ticket existe
     await _ensureTicketExists(ticketData);
 
     return true;
   }
 
+  /// ATUALIZADO: Função de Saída
   Future<bool> saida({
     required Map<String, dynamic> ticketData,
     required String sectorId,
@@ -94,8 +126,18 @@ class ProductionManager {
     hist.add(movClosed);
     await _movBox.put(hk, hist);
 
-    // 2. Remove o aberto
+    // 2. Remove o aberto E ADICIONA "EM TRÂNSITO"
     await _movBox.delete(key);
+
+    // Cria o novo registro "Em Trânsito"
+    final newTransitData = Map<String, dynamic>.from(open);
+    newTransitData['sector'] =
+        kTransitSectorId; // Define o setor como "trânsito"
+    newTransitData['inAt'] =
+        outAt.toIso8601String(); // Atualiza o InAt para o momento que saiu
+
+    await _movBox.put(_openKey(ticketId, kTransitSectorId), newTransitData);
+    // FIM DA MUDANÇA
 
     // 3. Atualiza produção diária
     final ymd = _ymd(outAt);
@@ -143,8 +185,6 @@ class ProductionManager {
     return (_dailyBox.get(pk) as int?) ?? 0;
   }
 
-  // --- CORREÇÃO DAS FUNÇÕES VAZIAS ---
-
   /// Soma os pares de todas as fichas abertas nesse setor
   int getFichasEmProducao(String firestoreId) {
     final openMovements = getOpenMovements(firestoreId);
@@ -161,7 +201,9 @@ class ProductionManager {
     return getDailyProduction(firestoreId, DateTime.now());
   }
 
-  // --- MÉTODO DE RELATÓRIO ADICIONADO CORRETAMENTE ---
+  // ---------------------------------------------------
+  // --- MÉTODOS DE RELATÓRIO DE PRODUÇÃO ---
+  // ---------------------------------------------------
 
   /// Gera um relatório de produção para um período e setores específicos.
   ProductionReport generateProductionReport({
@@ -186,7 +228,6 @@ class ProductionManager {
       final List<Map<String, dynamic>> sectorFinalizedFichas = [];
 
       // 2. Calcula "PRODUZIDO NO PERÍODO" (lendo o histórico)
-      // Itera sobre todas as chaves do histórico
       for (final key in _movBox.keys) {
         if (key is String && key.startsWith('hist::')) {
           final histList = _movBox.get(key) as List?;
@@ -194,12 +235,9 @@ class ProductionManager {
 
           for (final movement in histList) {
             if (movement is Map) {
-              // Verifica se o movimento é do setor correto e tem data de saída
               if (movement['sector'] == sectorId && movement['outAt'] != null) {
                 try {
                   final outAtDate = DateTime.parse(movement['outAt']);
-
-                  // Verifica se a data de saída está DENTRO do período selecionado
                   if (!outAtDate.isBefore(startDate) &&
                       outAtDate.isBefore(endDateAdjusted)) {
                     final pairs = (movement['pairs'] as int?) ?? 0;
@@ -207,17 +245,14 @@ class ProductionManager {
                     sectorFinalizedFichas
                         .add(Map<String, dynamic>.from(movement));
                   }
-                } catch (_) {
-                  // Ignora se a data for inválida
-                }
+                } catch (_) {}
               }
             }
           }
         }
       }
 
-      // 3. Calcula "EM PRODUÇÃO ATUALMENTE" (lendo as fichas abertas)
-      // (Isso usa os métodos que você já tinha!)
+      // 3. Calcula "EM PRODUÇÃO ATUALMENTE"
       final sectorInProduction = getFichasEmProducao(sectorId);
       final sectorOpenFichas = getOpenMovements(sectorId);
 
@@ -246,12 +281,176 @@ class ProductionManager {
       totalCurrentlyInProduction: grandTotalInProduction,
     );
   }
+
+  // ---------------------------------------------------
+  // --- MÉTODOS DE GARGALO ---
+  // ---------------------------------------------------
+
+  /// Lista de motivos padrão para o diálogo de gargalo
+  final List<String> kBottleneckReasons = [
+    'Faltou funcionário',
+    'Máquina estragada',
+    'Falta de Energia',
+    'Acidente de trabalho',
+    kMissingPartReason, // <-- Esta linha agora usa a constante corrigida
+    kOtherReason, // <-- Esta linha agora usa a constante corrigida
+  ];
+
+  /// Cria um novo gargalo
+  Future<void> createBottleneck({
+    required String sectorId,
+    required String reason,
+    String? customReason,
+    String? partName, // <-- NOVO CAMPO
+  }) async {
+    final key = DateTime.now().toIso8601String();
+    final data = {
+      'id': key, // <-- Salva a própria chave para referência
+      'sectorId': sectorId,
+      'reason': reason,
+      'customReason': customReason,
+      'partName': partName, // <-- Salva o nome da peça
+      'startedAt': key,
+    };
+    await _activeBottlenecksBox.put(key, data);
+  }
+
+  /// Resolve um gargalo ativo
+  Future<void> resolveBottleneck({required String bottleneckKey}) async {
+    final activeData = _activeBottlenecksBox.get(bottleneckKey);
+    if (activeData == null) return;
+    final resolvedData = Map<String, dynamic>.from(activeData);
+    resolvedData['resolvedAt'] = DateTime.now().toIso8601String();
+    await _historyBottlenecksBox.add(resolvedData);
+    await _activeBottlenecksBox.delete(bottleneckKey);
+  }
+
+  /// Pega TODOS os gargalos ativos de um setor específico
+  List<Map<String, dynamic>> getActiveBottlenecksForSector(String sectorId) {
+    return _activeBottlenecksBox.values
+        .where((data) => (data as Map)['sectorId'] == sectorId)
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+  }
+
+  /// Pega TODOS os gargalos ativos (para o banner de alerta)
+  List<Map<String, dynamic>> getAllActiveBottlenecks() {
+    return _activeBottlenecksBox.values
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+  }
+
+  // ---------------------------------------------------
+  // --- NOVAS FUNÇÕES ADICIONADAS (SUGESTÕES 2 e 3) ---
+  // ---------------------------------------------------
+
+  /**
+   * SUGESTÃO 3: Painel de Fichas Abertas (WIP)
+   * Busca todas as fichas que estão atualmente "abertas" (open::)
+   * em qualquer setor.
+   */
+  List<Map<String, dynamic>> getAllWorkInProgressFichas() {
+    final wipFichas = <Map<String, dynamic>>[];
+    for (final key in _movBox.keys) {
+      if (key is String && key.startsWith('open::')) {
+        wipFichas.add(Map<String, dynamic>.from(_movBox.get(key)));
+      }
+    }
+    // Ordena pela data de entrada, as mais recentes primeiro
+    wipFichas
+        .sort((a, b) => (b['inAt'] as String).compareTo(a['inAt'] as String));
+    return wipFichas;
+  }
+
+  /**
+   * SUGESTÃO 2: Relatório de Histórico de Gargalos
+   * Analisa a 'bottlenecks_history_box' e agrupa os
+   * problemas por motivo e tempo total perdido.
+   */
+  BottleneckReport generateBottleneckReport({
+    required DateTime startDate,
+    required DateTime endDate,
+  }) {
+    // Ajusta a data final para incluir o dia inteiro (até 23:59:59)
+    final endDateAdjusted =
+        DateTime(endDate.year, endDate.month, endDate.day, 23, 59, 59);
+
+    final resolvedInPeriod = <Map<String, dynamic>>[];
+    // 1. Filtra todos os gargalos resolvidos dentro do período
+    for (final data in _historyBottlenecksBox.values) {
+      final resolvedData = Map<String, dynamic>.from(data as Map);
+      if (resolvedData['resolvedAt'] == null) continue;
+
+      try {
+        final resolvedDate = DateTime.parse(resolvedData['resolvedAt']);
+        // Compara se foi resolvido dentro do range
+        if (!resolvedDate.isBefore(startDate) &&
+            resolvedDate.isBefore(endDateAdjusted)) {
+          resolvedInPeriod.add(resolvedData);
+        }
+      } catch (_) {
+        // Ignora datas inválidas
+      }
+    }
+
+    // 2. Agrupa os gargalos filtrados por motivo
+    final summaryMap = <String, BottleneckSummaryItem>{};
+
+    for (final bottleneck in resolvedInPeriod) {
+      // Define uma "chave" única para o motivo
+      String reasonKey = bottleneck['reason'];
+      if (reasonKey == kOtherReason) {
+        reasonKey = bottleneck['customReason'] ?? kOtherReason;
+      } else if (reasonKey == kMissingPartReason) {
+        reasonKey =
+            '$kMissingPartReason: ${bottleneck['partName'] ?? 'Não especificada'}';
+      }
+
+      // Calcula a duração do gargalo
+      Duration duration = Duration.zero;
+      try {
+        final started = DateTime.parse(bottleneck['startedAt']);
+        final resolved = DateTime.parse(bottleneck['resolvedAt']);
+        duration = resolved.difference(started);
+      } catch (_) {
+        // Ignora se não puder calcular a duração
+      }
+
+      // Adiciona ou atualiza o item no mapa de resumo
+      if (summaryMap.containsKey(reasonKey)) {
+        // Se já existe, soma
+        final item = summaryMap[reasonKey]!;
+        item.count++;
+        item.totalDuration += duration;
+      } else {
+        // Se é novo, cria
+        summaryMap[reasonKey] = BottleneckSummaryItem(
+          reason: reasonKey,
+          count: 1,
+          totalDuration: duration,
+        );
+      }
+    }
+
+    // 3. Ordena o resultado (do mais demorado para o menos)
+    final summaryList = summaryMap.values.toList();
+    summaryList.sort((a, b) => b.totalDuration.compareTo(a.totalDuration));
+
+    // 4. Retorna o relatório completo
+    return BottleneckReport(
+      startDate: startDate,
+      endDate: endDate,
+      summary: summaryList,
+      rawData: resolvedInPeriod, // Lista de todos os gargalos no período
+    );
+  }
 } // <-- FIM DA CLASSE ProductionManager
 
-// --- MODELOS PARA O RELATÓRIO ---
-// (Estão FORA da classe ProductionManager, que é o correto)
+// ---------------------------------------------------
+// --- MODELOS DE RELATÓRIO DE PRODUÇÃO (Existentes) ---
+// ---------------------------------------------------
 
-/// Contém o resultado completo do relatório gerado.
+/// Contém o resultado completo do relatório de produção.
 class ProductionReport {
   final DateTime startDate;
   final DateTime endDate;
@@ -290,5 +489,41 @@ class SectorReportData {
     required this.finalizedFichasInRange,
     required this.currentlyInProduction,
     required this.openFichas,
+  });
+}
+
+// ---------------------------------------------------
+// --- NOVOS MODELOS DE RELATÓRIO DE GARGALOS ---
+// ---------------------------------------------------
+
+/// Contém o resultado completo do relatório de gargalos.
+class BottleneckReport {
+  final DateTime startDate;
+  final DateTime endDate;
+
+  /// Uma lista resumida, agrupada por motivo.
+  final List<BottleneckSummaryItem> summary;
+
+  /// A lista completa de todos os gargalos no período.
+  final List<Map<String, dynamic>> rawData;
+
+  BottleneckReport({
+    required this.startDate,
+    required this.endDate,
+    required this.summary,
+    required this.rawData,
+  });
+}
+
+/// Representa um único item no resumo do relatório de gargalos.
+class BottleneckSummaryItem {
+  final String reason;
+  int count;
+  Duration totalDuration;
+
+  BottleneckSummaryItem({
+    required this.reason,
+    this.count = 0,
+    this.totalDuration = Duration.zero,
   });
 }

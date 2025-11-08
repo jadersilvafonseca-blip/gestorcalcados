@@ -1,5 +1,5 @@
-// lib/pages/dashboard_page.dart
 import 'package:flutter/material.dart';
+import 'package:gestor_calcados_new/data/material_repository.dart';
 import 'package:hive/hive.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
@@ -9,17 +9,38 @@ import 'tickets_page.dart';
 import 'scanner_page.dart';
 import 'product_form_page.dart';
 import 'product_list_page.dart';
-import 'report_page.dart'; // <-- 1. IMPORT ADICIONADO
+import 'report_page.dart';
+
+// --- NOVOS IMPORTS (MATERIAIS) ---
+// (Agora ativados!)
+import 'material_form_page.dart';
+import 'material_list_page.dart';
+// ------------------------------------
 
 // Import do modelo oficial
 import '../models/sector_models.dart';
+// Import do repositório de materiais (necessário para o init)
 
 // Import do ProductionManager (integração Hive + regras)
-import '../services/production_manager.dart';
+import '../services/production_manager.dart' hide kTransitSectorId;
+// --- NOVO IMPORT PARA O BACKUP ---
+import '../services/backup_service.dart';
+// ---------------------------------
 
 // Boxes usadas pelo scanner / produção
 const String kMovementsBox = 'movements_box';
 const String kSectorDailyBox = 'sector_daily';
+// --- ADICIONADO PARA GARGALOS ---
+const String kBottlenecksActiveBox = 'bottlenecks_active_box';
+// ---------------------------------
+
+// --- Constantes de Motivo de Gargalo (para a UI) ---
+// (Movido para cá para ser acessível por todos os widgets no arquivo)
+const String kMissingPartReason = 'Reposição de peça'; // <-- TEXTO ALTERADO
+const String kOtherReason = 'Outros (especificar)';
+// ------------------------------------------------
+
+// --- ENUM DO SEMÁFORO REMOVIDO ---
 
 // ---------- Utils (com espaços corrigidos) ----------
 String _ymd(DateTime d) =>
@@ -44,6 +65,28 @@ int _getInProcessNow(Box movBox, String sectorFirestoreId) {
     }
   }
   return totalPares;
+}
+
+// --- ATUALIZADO: Helper para pegar nome do setor (com "Em Trânsito") ---
+String _getSectorName(String sectorId) {
+  // Adiciona a verificação para o status kTransitSectorId
+  if (sectorId == kTransitSectorId) {
+    return 'Em Trânsito';
+  }
+  try {
+    return Sector.values.firstWhere((s) => s.firestoreId == sectorId).label;
+  } catch (_) {
+    return sectorId; // Fallback
+  }
+}
+
+// --- ADICIONADO: Helper para pegar o Enum do setor ---
+Sector? _getSectorFromId(String sectorId) {
+  try {
+    return Sector.values.firstWhere((s) => s.firestoreId == sectorId);
+  } catch (_) {
+    return null; // Fallback
+  }
 }
 // ====================================================================
 
@@ -70,6 +113,17 @@ class _DashboardPageState extends State<DashboardPage> {
     if (!Hive.isBoxOpen(kSectorDailyBox)) {
       await Hive.openBox(kSectorDailyBox);
     }
+    // --- ABRE A BOX DE GARGALO ---
+    if (!Hive.isBoxOpen(kBottlenecksActiveBox)) {
+      await Hive.openBox(kBottlenecksActiveBox);
+    }
+    // ---------------------------------
+
+    // ### ATIVADO: INICIALIZA O REPOSITÓRIO DE MATERIAIS ###
+    // Isso garante que a 'materials_box' esteja aberta
+    // antes que qualquer página tente usá-la.
+    await MaterialRepository().init();
+    // #######################################################
 
     try {
       // 2. CORREÇÃO: Usar ProductionManager.instance
@@ -102,7 +156,7 @@ class _DashboardPageState extends State<DashboardPage> {
               padding: const EdgeInsets.fromLTRB(16.0, 50.0, 16.0,
                   20.0), // Ajuste o padding (top 50, bottom 20)
               child: Text(
-                'Menu Principal', // Título Mantido
+                'Menu Principal', // Título MantIDO
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                       fontWeight: FontWeight.bold,
                     ),
@@ -134,7 +188,7 @@ class _DashboardPageState extends State<DashboardPage> {
               },
             ),
 
-            // --- 3. BOTÃO DE RELATÓRIO ADICIONADO ---
+            // --- BOTÃO DE RELATÓRIO ADICIONADO ---
             ListTile(
               leading: const Icon(Icons.assessment_outlined),
               title: const Text('Relatório de Produção'),
@@ -146,6 +200,32 @@ class _DashboardPageState extends State<DashboardPage> {
               },
             ),
             // --- FIM DA ADIÇÃO ---
+
+            // --- NOVO BOTÃO DE BACKUP ADICIONADO ---
+            ListTile(
+              leading: const Icon(Icons.backup_outlined),
+              title: const Text('Backup de Dados'),
+              onTap: () {
+                Navigator.pop(context); // Fecha o Drawer
+                // Chama o serviço de backup
+                BackupService.generateBackup(context);
+              },
+            ),
+            // --- FIM DA ADIÇÃO ---
+
+            // --- NOVO BOTÃO DE RESTAURAR ADICIONADO ---
+            ListTile(
+              leading: const Icon(Icons.settings_backup_restore_outlined),
+              title: const Text('Restaurar Backup'),
+              onTap: () {
+                Navigator.pop(context); // Fecha o Drawer
+                // Chama o serviço de restauração
+                BackupService.restoreBackup(context);
+              },
+            ),
+            // --- FIM DA ADIÇÃO ---
+
+            const Divider(), // Divisor para separar as seções
 
             ListTile(
               leading: const Icon(Icons.add_box_outlined),
@@ -168,16 +248,63 @@ class _DashboardPageState extends State<DashboardPage> {
                 ));
               },
             ),
+
+            // --- NOVA SEÇÃO DE MATERIAIS (LÓGICA ATIVADA) ---
+            const Divider(), // Divisor para a nova seção
+
+            ListTile(
+              leading: const Icon(Icons.inventory_2_outlined),
+              title: const Text('Cadastrar Novo Material'),
+              onTap: () {
+                Navigator.pop(context);
+                // ATIVADO: Navega para o formulário
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const MaterialFormPage(),
+                  fullscreenDialog: true,
+                ));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.storage_outlined),
+              title: const Text('Ver Materiais Cadastrados'),
+              onTap: () {
+                Navigator.pop(context);
+                // ATIVADO: Navega para a lista
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const MaterialListPage(),
+                ));
+              },
+            ),
+            // --- FIM DA NOVA SEÇÃO ---
           ],
         ),
       ),
+      // --- APPBAR ATUALIZADA ---
       appBar: AppBar(
-        title: const FittedBox(
-          fit: BoxFit.fitWidth,
-          child: Text('Bem-vindo à sua produção 👟'),
+        flexibleSpace: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                Theme.of(context).primaryColor,
+                Theme.of(context).primaryColorDark, // Usa as cores do tema
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
         ),
+        title: const Text(
+          'Painel de Produção 👟',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Colors.white, // Garante texto branco
+          ),
+        ),
+        iconTheme: const IconThemeData(
+            color: Colors.white), // Deixa o ícone do menu branco
         actions: const [], // Sem actions
       ),
+      // --- FIM DA ATUALIZAÇÃO ---
       body: SafeArea(
         bottom: true,
         top: false,
@@ -197,16 +324,246 @@ class _DashboardBody extends StatelessWidget {
 
   const _DashboardBody({required this.dailyBox, required this.movBox});
 
+  // --- ATUALIZADO: O diálogo que lista TODOS os gargalos (Layout Corrigido) ---
+  void _showActiveBottlenecksDialog(
+      BuildContext context, List<Map<String, dynamic>> bottlenecks) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Gargalos Ativos'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: bottlenecks.length,
+              itemBuilder: (context, index) {
+                final bottleneck = bottlenecks[index];
+                final sectorId = bottleneck['sectorId'];
+                final sectorName = _getSectorName(sectorId);
+
+                // Lógica para mostrar o motivo (com "Outros" e "Peça")
+                String reason = bottleneck['reason'];
+                if (reason == kOtherReason) {
+                  reason = bottleneck['customReason'] ?? 'Outros';
+                } else if (reason == kMissingPartReason) {
+                  reason =
+                      'Reposição de peça: ${bottleneck['partName'] ?? 'Não especificada'}';
+                }
+
+                // --- CORREÇÃO DE LAYOUT DO LISTTILE ---
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16.0, vertical: 4.0),
+                  leading: Icon(Icons.warning_amber_rounded,
+                      color: Colors.red.shade800),
+                  title: Text(sectorName,
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  // O Subtitle agora é uma Coluna com o motivo e o botão
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(reason), // Descrição com largura total
+                      const SizedBox(height: 8),
+                      // Alinha o botão à direita
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                          child: const Text('Resolver'),
+                          onPressed: () {
+                            ProductionManager.instance.resolveBottleneck(
+                                bottleneckKey: bottleneck['id']);
+                            Navigator.of(context).pop(); // Fecha o diálogo
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  onTap: () {
+                    // Navega para o setor
+                    final sector = _getSectorFromId(sectorId);
+                    if (sector != null) {
+                      Navigator.of(context).pop(); // Fecha o diálogo
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => _SectorDetailShell(sector: sector),
+                        ),
+                      );
+                    }
+                  },
+                );
+                // --- FIM DA CORREÇÃO DE LAYOUT ---
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              child: const Text('Fechar'),
+              onPressed: () => Navigator.of(context).pop(),
+            )
+          ],
+        );
+      },
+    );
+  }
+
+  // --- ATUALIZADO: Diálogo para mostrar as Fichas Abertas (WIP) com Pesquisa ---
+  void _showWipFichasDialog(
+      BuildContext context, List<Map<String, dynamic>> wipFichas) {
+    // Variáveis para controlar o estado do diálogo
+    String searchQuery = '';
+    List<Map<String, dynamic>> filteredFichas = List.from(wipFichas);
+    // Controller para limpar o texto
+    final searchController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        // StatefulBuilder é necessário para atualizar o estado do diálogo (a lista filtrada)
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: Text('Fichas em Produção (${filteredFichas.length})'),
+              // Remove o padding padrão para a lista encostar
+              contentPadding: const EdgeInsets.only(top: 20.0, bottom: 0),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // --- BARRA DE PESQUISA ADICIONADA ---
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                      child: TextField(
+                        controller: searchController,
+                        onChanged: (value) {
+                          // Filtra a lista
+                          setStateDialog(() {
+                            searchQuery = value.toLowerCase();
+                            filteredFichas = wipFichas.where((ficha) {
+                              final ticketId =
+                                  (ficha['ticketId'] ?? '').toLowerCase();
+                              return ticketId.contains(searchQuery);
+                            }).toList();
+                          });
+                        },
+                        decoration: InputDecoration(
+                          labelText: 'Pesquisar por Ficha',
+                          prefixIcon: const Icon(Icons.search),
+                          suffixIcon: searchQuery.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(Icons.clear),
+                                  onPressed: () {
+                                    // Limpa o controller e atualiza o estado
+                                    searchController.clear();
+                                    setStateDialog(() {
+                                      searchQuery = '';
+                                      filteredFichas = wipFichas;
+                                    });
+                                  },
+                                )
+                              : null,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // --- FIM DA BARRA DE PESQUISA ---
+
+                    // --- LISTA DE FICHAS ---
+                    Flexible(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount:
+                            filteredFichas.length, // Usa a lista filtrada
+                        itemBuilder: (context, index) {
+                          final ficha =
+                              filteredFichas[index]; // Usa a lista filtrada
+
+                          // --- ATUALIZADO: Mostra "Em Trânsito" ---
+                          final bool isTransit =
+                              ficha['sector'] == kTransitSectorId;
+                          final sectorName = _getSectorName(ficha['sector']);
+                          // -----------------------------------------
+
+                          return ListTile(
+                            contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 24.0),
+                            leading: Icon(
+                              // Mostra ícone diferente para "Em Trânsito"
+                              isTransit
+                                  ? Icons.compare_arrows_outlined
+                                  : Icons.sync,
+                              color: isTransit
+                                  ? Colors.grey[700]
+                                  : Theme.of(context).primaryColor,
+                            ),
+                            title: Text('Ficha: ${ficha['ticketId']}'),
+                            subtitle:
+                                Text(sectorName), // Já mostra "Em Trânsito"
+                            trailing: Text('${ficha['pairs']} pares'),
+                            onTap: () {
+                              // Não deixa clicar se estiver "Em Trânsito"
+                              if (isTransit) return;
+
+                              // Navega para o setor
+                              final sector = _getSectorFromId(ficha['sector']);
+                              if (sector != null) {
+                                Navigator.of(context).pop(); // Fecha o diálogo
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        _SectorDetailShell(sector: sector),
+                                  ),
+                                );
+                              }
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    // --- FIM DA LISTA ---
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  child: const Text('Fechar'),
+                  onPressed: () => Navigator.of(context).pop(),
+                )
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+  // --- FIM DO DIÁLOGO WIP ---
+
   @override
   Widget build(BuildContext context) {
+    // --- ADICIONADO: Pega a box de gargalos ---
+    final bottleneckBox = Hive.box(kBottlenecksActiveBox);
+
     final merged = Listenable.merge([
       dailyBox.listenable(),
       movBox.listenable(),
+      bottleneckBox.listenable(), // <-- Escuta a nova box
     ]);
 
     return AnimatedBuilder(
       animation: merged,
       builder: (context, _) {
+        // --- ADICIONADO: Pega todos os gargalos 1 vez ---
+        final allActiveBottlenecks =
+            ProductionManager.instance.getAllActiveBottlenecks();
+
         final tiles = Sector.values.map((s) {
           // 2. CORREÇÃO: Usar ProductionManager.instance
           final pm = ProductionManager.instance;
@@ -221,6 +578,8 @@ class _DashboardBody extends StatelessWidget {
             emProducao = _getInProcessNow(movBox, s.firestoreId);
           }
 
+          // --- LÓGICA DO SEMÁFORO REMOVIDA ---
+
           return _SectorTile(
             icon: s.icon,
             nome: s.label,
@@ -233,6 +592,9 @@ class _DashboardBody extends StatelessWidget {
                 ),
               );
             },
+            // --- NOVO: Passa a cor para o Card ---
+            color: s.color,
+            // ------------------------------------
           );
         }).toList();
 
@@ -241,33 +603,83 @@ class _DashboardBody extends StatelessWidget {
         final totalHoje = ProductionManager.instance
             .getProducaoDoDia(Sector.montagem.firestoreId);
 
-        return Column(
-          children: [
-            const SizedBox(height: 12),
-            _ResumoGeral(totalHoje: totalHoje),
-            const SizedBox(height: 8),
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, c) {
-                  final cross = c.maxWidth >= 900 ? 3 : 2;
-                  return GridView.builder(
-                    cacheExtent: 600,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: cross,
-                      mainAxisSpacing: 12,
-                      crossAxisSpacing: 12,
-                      childAspectRatio: 0.87,
-                    ),
-                    itemCount: tiles.length,
-                    itemBuilder: (_, i) => tiles[i],
-                  );
-                },
+        // --- ADICIONADO (SUGESTÃO 3): Pega as fichas WIP ---
+        final activeWipFichas =
+            ProductionManager.instance.getAllWorkInProgressFichas();
+
+        // --- CORREÇÃO DE LAYOUT: Troca Column/ListView por CustomScrollView/Slivers ---
+        return CustomScrollView(
+          slivers: [
+            // --- Banner de Alerta ---
+            if (allActiveBottlenecks.isNotEmpty) // <-- Usa a variável local
+              SliverToBoxAdapter(
+                child: InkWell(
+                  onTap: () {
+                    // Chama o novo diálogo
+                    _showActiveBottlenecksDialog(context, allActiveBottlenecks);
+                  },
+                  child: _GlobalBottleneckBanner(
+                      bottlenecks: allActiveBottlenecks),
+                ),
               ),
+
+            // --- Resumo Geral ---
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 12.0),
+                child: _ResumoGeral(totalHoje: totalHoje),
+              ),
+            ),
+
+            // --- Painel WIP (AGORA CLICÁVEL) ---
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 12.0),
+                child: _WorkInProgressPanel(
+                  wipFichas: activeWipFichas,
+                  onTap: () {
+                    // Chama o novo diálogo de WIP
+                    _showWipFichasDialog(context, activeWipFichas);
+                  },
+                ),
+              ),
+            ),
+
+            // --- Título "Visão por Setor" ---
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16.0, 12.0, 16.0, 8.0),
+                child: Text(
+                  'Visão por Setor',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+
+            // --- Grid de Setores ---
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2, // Travado em 2 colunas
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 0.87,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => tiles[index],
+                  childCount: tiles.length,
+                ),
+              ),
+            ),
+
+            // --- Espaçador no final ---
+            SliverToBoxAdapter(
+              child: const SizedBox(height: 20),
             ),
           ],
         );
+        // --- FIM DA CORREÇÃO DE LAYOUT ---
       },
     );
   }
@@ -333,24 +745,31 @@ class _ResumoGeral extends StatelessWidget {
   }
 }
 
+// --- ATUALIZADO: _SectorTile agora aceita cor E STATUS ---
 class _SectorTile extends StatelessWidget {
   final IconData icon;
   final String nome;
   final int producaoDia;
   final int emProducao;
   final VoidCallback onTap;
+  final Color color; // <-- NOVO: Parâmetro de cor
 
+  // --- PARÂMETRO STATUS REMOVIDO ---
   const _SectorTile({
     required this.icon,
     required this.nome,
     required this.producaoDia,
     required this.emProducao,
     required this.onTap,
+    required this.color, // <-- NOVO: Parâmetro de cor
   });
 
   @override
   Widget build(BuildContext context) {
-    const bg = Color(0xFF223147);
+    // const bg = Color(0xFF223147); <-- Antiga cor fixa
+    final bg = color; // <-- USA A COR DO SETOR
+
+    // --- ATUALIZADO: Stack removido ---
     return InkWell(
       borderRadius: BorderRadius.circular(18),
       onTap: onTap,
@@ -403,6 +822,7 @@ class _SectorTile extends StatelessWidget {
         ),
       ),
     );
+    // --- FIM DA ATUALIZAÇÃO ---
   }
 }
 
@@ -424,10 +844,129 @@ class _SectorDetailShell extends StatelessWidget {
     }
   }
 
+  // --- ATUALIZADO: DIÁLOGO PARA CRIAR GARGALO (COM CAMPO DE PEÇA) ---
+  void _showCreateBottleneckDialog(BuildContext context) {
+    // Usamos um StatefulBuilder para gerenciar o estado do diálogo
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        String selectedReason =
+            ProductionManager.instance.kBottleneckReasons.first;
+        String customReason = '';
+        String partName = ''; // <-- NOVO: Armazena o nome da peça
+        bool showCustomField = false;
+        bool showPartNameField = false; // <-- NOVO: Controla o campo de peça
+
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text('Registrar Gargalo'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Gera a lista de opções de rádio
+                    ...ProductionManager.instance.kBottleneckReasons
+                        .map((reason) {
+                      return RadioListTile<String>(
+                        title: Text(reason),
+                        value: reason,
+                        groupValue: selectedReason,
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setStateDialog(() {
+                            selectedReason = value;
+                            // ATUALIZADO: Controla os campos extras
+                            showCustomField = (value == kOtherReason);
+                            showPartNameField = (value == kMissingPartReason);
+                          });
+                        },
+                      );
+                    }).toList(),
+
+                    // NOVO: Campo de texto para "Peça Faltando"
+                    if (showPartNameField)
+                      Padding(
+                        padding: const EdgeInsets.only(
+                            top: 8.0, left: 16, right: 16),
+                        child: TextField(
+                          onChanged: (value) => partName = value,
+                          decoration: const InputDecoration(
+                            labelText: 'Qual peça está faltando?',
+                            border: OutlineInputBorder(),
+                          ),
+                          autofocus: true,
+                        ),
+                      ),
+
+                    // Campo de texto para "Outros"
+                    if (showCustomField)
+                      Padding(
+                        padding: const EdgeInsets.only(
+                            top: 8.0, left: 16, right: 16),
+                        child: TextField(
+                          onChanged: (value) => customReason = value,
+                          decoration: const InputDecoration(
+                            labelText: 'Especifique o motivo',
+                            border: OutlineInputBorder(),
+                          ),
+                          autofocus: true,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  child: const Text('Cancelar'),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+                FilledButton(
+                  child: const Text('Confirmar'),
+                  onPressed: () {
+                    // Validação para "Outros"
+                    if (showCustomField && customReason.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text(
+                                'Por favor, especifique o motivo em "Outros"')),
+                      );
+                      return;
+                    }
+                    // NOVO: Validação para "Peça"
+                    if (showPartNameField && partName.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text(
+                                'Por favor, especifique a peça que está faltando')),
+                      );
+                      return;
+                    }
+
+                    // ATUALIZADO: Chama o ProductionManager com todos os dados
+                    ProductionManager.instance.createBottleneck(
+                      sectorId: sector.firestoreId,
+                      reason: selectedReason,
+                      customReason: showCustomField ? customReason : null,
+                      partName: showPartNameField ? partName : null,
+                    );
+                    Navigator.of(context).pop();
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final daily = Hive.box(kSectorDailyBox);
     final movs = Hive.box(kMovementsBox);
+    // --- ADICIONADO: Pega a box de gargalos ---
+    final bottlenecks = Hive.box(kBottlenecksActiveBox);
 
     // --- Funções locais ---
     int producaoDia() {
@@ -501,8 +1040,11 @@ class _SectorDetailShell extends StatelessWidget {
     }
     // --- Fim das funções ---
 
-    final listenable =
-        Listenable.merge([daily.listenable(), movs.listenable()]);
+    final listenable = Listenable.merge([
+      daily.listenable(),
+      movs.listenable(),
+      bottlenecks.listenable(), // <-- ADICIONADO: Escuta a box de gargalos
+    ]);
 
     return Scaffold(
       appBar: AppBar(title: Text('Setor: ${sector.label}')),
@@ -513,6 +1055,10 @@ class _SectorDetailShell extends StatelessWidget {
           final emPares = emProducaoSomaPares();
           final fichasAbertas = _getFichasAbertas();
           final fichasFinalizadas = _getFichasFinalizadasNoSetor();
+
+          // --- ATUALIZADO: Pega a LISTA de gargalos ---
+          final activeBottlenecks = ProductionManager.instance
+              .getActiveBottlenecksForSector(sector.firestoreId);
 
           return ListView(
             padding: const EdgeInsets.all(16),
@@ -538,17 +1084,95 @@ class _SectorDetailShell extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              FilledButton.icon(
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Ler QR'),
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                        builder: (_) =>
-                            ScannerPage(sectorId: sector.firestoreId)),
-                  );
-                },
+
+              // --- ATUALIZADO: Row para os botões ---
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: const Text('Ler QR'),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                              builder: (_) =>
+                                  ScannerPage(sectorId: sector.firestoreId)),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+
+                  // --- ATUALIZADO: Botão "Gargalo" é permanente ---
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.warning_amber_rounded),
+                      label: const Text('Gargalo'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.orange.shade800,
+                        side: BorderSide(
+                          color: Colors.orange.shade800,
+                        ),
+                      ),
+                      onPressed: () {
+                        // Sempre abre o diálogo de CRIAR
+                        _showCreateBottleneckDialog(context);
+                      },
+                    ),
+                  ),
+                ],
               ),
+              // --- FIM DA MUDANÇA ---
+
+              // --- ADICIONADO: Lista de Gargalos Ativos no Setor ---
+              if (activeBottlenecks.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                Text(
+                  'Gargalos Ativos (${activeBottlenecks.length})',
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleLarge
+                      ?.copyWith(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const Divider(thickness: 1),
+                ListView.builder(
+                  physics: const NeverScrollableScrollPhysics(),
+                  shrinkWrap: true,
+                  itemCount: activeBottlenecks.length,
+                  itemBuilder: (context, index) {
+                    final bottleneck = activeBottlenecks[index];
+
+                    // Lógica para mostrar o motivo (com "Outros" e "Peça")
+                    String reason = bottleneck['reason'];
+                    if (reason == kOtherReason) {
+                      reason = bottleneck['customReason'] ?? 'Outros';
+                    } else if (reason == kMissingPartReason) {
+                      reason =
+                          'Reposição de peça: ${bottleneck['partName'] ?? 'Não especificada'}';
+                    }
+
+                    return ListTile(
+                      leading: Icon(Icons.warning_amber_rounded,
+                          color: Colors.orange.shade800),
+                      title: Text(reason),
+                      subtitle: Text(
+                          'Iniciado em: ${_formatarData(bottleneck['startedAt'])}'),
+                      trailing: TextButton(
+                        child: const Text('Resolver'),
+                        onPressed: () {
+                          // --- ESTA É A CORREÇÃO PARA A "TRAVADINHA" ---
+                          // Nós passamos a "chave" (id) do gargalo
+                          ProductionManager.instance.resolveBottleneck(
+                            bottleneckKey: bottleneck['id'],
+                          );
+                          // ----------------------------------------------
+                        },
+                      ),
+                    );
+                  },
+                ),
+              ],
+              // --- FIM DA ADIÇÃO ---
 
               // --- Lista de Fichas Abertas ---
               const SizedBox(height: 24),
@@ -632,6 +1256,94 @@ class _SectorDetailShell extends StatelessWidget {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+// --- ATUALIZADO (SUGESTÃO 3): Painel WIP agora é clicável ---
+class _WorkInProgressPanel extends StatelessWidget {
+  final List<Map<String, dynamic>> wipFichas;
+  final VoidCallback onTap; // <-- NOVO: Callback
+  const _WorkInProgressPanel({required this.wipFichas, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12),
+      elevation: 2,
+      child: ListTile(
+        // <-- MUDANÇA: Substituído ExpansionTile por ListTile
+        leading: Icon(Icons.sync, color: Theme.of(context).primaryColor),
+        title: Text(
+          'Fichas em Produção (${wipFichas.length})', // <-- MUDANÇA: "(WIP)" removido
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        subtitle: const Text('Clique para ver a lista de fichas abertas'),
+        trailing:
+            const Icon(Icons.arrow_forward_ios, size: 16), // <-- MUDANÇA: Ícone
+        onTap: onTap, // <-- MUDANÇA: Chama o callback
+      ),
+    );
+  }
+}
+
+// --- ATUALIZADO: WIDGET DO BANNER DE ALERTA GLOBAL (VERMELHO E COM ÍCONE) ---
+class _GlobalBottleneckBanner extends StatelessWidget {
+  final List<Map<String, dynamic>> bottlenecks;
+  const _GlobalBottleneckBanner({required this.bottlenecks});
+
+  @override
+  Widget build(BuildContext context) {
+    // --- LÓGICA DO TEXTO ATUALIZADA ---
+    String bannerText;
+    if (bottlenecks.length == 1) {
+      final bottleneck = bottlenecks.first;
+      final sectorName = _getSectorName(bottleneck['sectorId']);
+      String reason = bottleneck['reason'];
+      if (reason == kOtherReason) {
+        reason = bottleneck['customReason'] ?? 'Outros';
+      } else if (reason == kMissingPartReason) {
+        reason =
+            'Reposição de peça: ${bottleneck['partName'] ?? 'Não especificada'}';
+      }
+      bannerText = 'GARGALO ATIVO: $sectorName ($reason)';
+    } else {
+      bannerText =
+          '${bottlenecks.length} GARGALOS ATIVOS! (Clique para ver a lista)';
+    }
+    // --- FIM DA LÓGICA ---
+
+    return Container(
+      color: Colors.red.shade800, // <-- MMUDANÇA: Cor para vermelho
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        child: Row(
+          // <-- MUDANÇA: Adicionado Row
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(
+              // <-- MUDANÇA: Adicionado Ícone
+              Icons.warning_amber_rounded,
+              color: Colors.white,
+              size: 18,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              // <-- MUDANÇA: Adicionado Flexible
+              child: Text(
+                bannerText, // <-- Usa o novo texto
+                style: const TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis, // Evita quebra de linha feia
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

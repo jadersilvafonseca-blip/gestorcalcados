@@ -1,4 +1,6 @@
 // lib/models/ticket.dart
+// --- NOVO IMPORT ---
+import 'product.dart'; // Precisa saber o que é 'MaterialEstimate'
 
 /// Modelo simples usado pelo HiveService e pelos repositórios.
 class Ticket {
@@ -9,8 +11,13 @@ class Ticket {
   final String cor; // ex.: "Branco"
   final int pairs; // total de pares
   final Map<String, int> grade; // ex.: {"34":10, "35":20, ...}
-  final String observacao; // NOVO: Campo obrigatório
-  final String pedido; // NOVO: Campo obrigatório
+  final String observacao;
+  final String pedido;
+
+  // --- CAMPO NOVO ADICIONADO ---
+  // Lista do consumo de materiais calculado
+  final List<MaterialEstimate> materialsUsed;
+  // ----------------------------
 
   Ticket({
     required this.id,
@@ -20,9 +27,9 @@ class Ticket {
     required this.cor,
     required this.pairs,
     required this.grade,
-    // INCLUÍDOS NO CONSTRUTOR:
     required this.observacao,
     required this.pedido,
+    this.materialsUsed = const [], // <-- Adicionado ao construtor
   });
 
   factory Ticket.fromMap(Map<String, dynamic> m) {
@@ -37,9 +44,16 @@ class Ticket {
         (m['grade'] ?? const <String, int>{})
             .map((k, v) => MapEntry(k.toString(), _toInt(v))),
       ),
-      // LÊ OS NOVOS CAMPOS DO MAP:
       observacao: (m['observacao'] ?? '').toString(),
       pedido: (m['pedido'] ?? '').toString(),
+
+      // --- BLOCO NOVO (para ler o consumo do Hive) ---
+      materialsUsed: (m['materialsUsed'] as List?)
+              ?.map((e) =>
+                  MaterialEstimate.fromMap(Map<String, dynamic>.from(e as Map)))
+              .toList() ??
+          const [],
+      // ---------------------------------------------
     );
   }
 
@@ -51,9 +65,12 @@ class Ticket {
         'cor': cor,
         'pairs': pairs,
         'grade': grade,
-        // ADICIONA OS NOVOS CAMPOS NO MAP:
         'observacao': observacao,
         'pedido': pedido,
+
+        // --- CAMPO NOVO (para salvar o consumo no Hive) ---
+        'materialsUsed': materialsUsed.map((e) => e.toMap()).toList(),
+        // --------------------------------------------------
       };
 
   static int _toInt(Object? v) {
