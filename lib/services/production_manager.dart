@@ -1,220 +1,565 @@
-import 'package:hive/hive.dart';
-import '../services/hive_service.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:async';
+import 'dart:collection'; // Necessário para LinkedHashMap
+import 'dart:convert'; // Importado para o parseQrCode
+import '../models/sector_models.dart';
+import '../models/report_models.dart';
 
-/// Boxes auxiliares
-const String kMovementsBox = 'movements_box';
-const String kSectorDailyBox = 'sector_daily';
-// --- ADICIONADO PARA GARGALOS ---
-const String kBottlenecksActiveBox = 'bottlenecks_active_box';
-const String kBottlenecksHistoryBox = 'bottlenecks_history_box';
-// ---------------------------------
+// --- COLEÇÕES GLOBAIS (FILTRADAS POR TEAMID) ---
+const String kTicketsCollection = 'tickets';
+const String kMovementsCollection = 'movements';
+const String kDailyProductionCollection = 'daily_production';
+const String kActiveBottlenecksCollection = 'bottlenecks_active';
+const String kHistoryBottlenecksCollection = 'bottlenecks_history';
 
-// --- ADICIONADO: Constantes de Motivo de Gargalo ---
-const String kMissingPartReason =
-    'Reposição de peça'; // <-- MUDANÇA: O texto foi corrigido aqui
+const String kMissingPartReason = 'Reposição de peça';
 const String kOtherReason = 'Outros (especificar)';
-// ------------------------------------------------
-
-// --- ADICIONADO: Constante para "Em Trânsito" ---
 const String kTransitSectorId = 'transito';
-// ---------------------------------------------
 
 class ProductionManager {
-  // CORREÇÃO: Usando a instância estática correta (instance)
   static final ProductionManager instance = ProductionManager._internal();
   factory ProductionManager() => instance;
   ProductionManager._internal();
 
-  // --- Boxes ---
-  late Box<dynamic> _movBox;
-  late Box<dynamic> _dailyBox;
-  // --- ADICIONADO PARA GARGALOS ---
-  late Box<dynamic> _activeBottlenecksBox;
-  late Box<dynamic> _historyBottlenecksBox;
-  // ---------------------------------
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
 
-  /// Inicializa as boxes (passadas já abertas)
-  Future<void> initHiveBoxes({
-    required Box<dynamic> eventsBox,
-    required Box<dynamic> countersBox,
-  }) async {
-    _movBox = eventsBox;
-    _dailyBox = countersBox;
-    // --- ADICIONADO PARA GARGALOS ---
-    _activeBottlenecksBox = Hive.box(kBottlenecksActiveBox);
-    _historyBottlenecksBox = Hive.box(kBottlenecksHistoryBox);
-    // ---------------------------------
-  }
+  Map<String, ConfigurableSector>? _sectorModelsCache;
 
-  String _openKey(String ticketId, String sector) => 'open::$ticketId::$sector';
-  String _histKey(String ticketId) => 'hist::$ticketId';
-  String _prodKey(String sector, String dateYmd) => '$sector::$dateYmd';
+  // -------------------- UTIL --------------------
   String _ymd(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  String _prodKey(String sector, String dateYmd) => '$sector::$dateYmd';
+  String getDayKey(DateTime d) => _ymd(d);
 
-  // -------------------- FUNÇÕES PRINCIPAIS --------------------
+  // --- NOVOS HELPERS DE COLEÇÃO (PARA MULTI-FÁBRICA) ---
+  CollectionReference _sectorsCol(String teamId) {
+    return _db.collection('teams').doc(teamId).collection('sectors');
+  }
 
-  /// ATUALIZADO: Função de Entrada
+  // 🟢 ADICIONADO: Helper para coleções de movimentação
+  CollectionReference _movementsCol(String teamId) {
+    return _db.collection('teams').doc(teamId).collection(kMovementsCollection);
+  }
+
+  DocumentReference _orderDoc(String teamId) {
+    return _db
+        .collection('teams')
+        .doc(teamId)
+        .collection('config')
+        .doc('sector_order');
+  }
+  // --- FIM DOS NOVOS HELPERS ---
+
+  Future<T> _retry<T>(Future<T> Function() fn,
+      {int retries = 3,
+      Duration initialDelay = const Duration(milliseconds: 300)}) async {
+    var attempt = 0;
+    var delay = initialDelay;
+    while (true) {
+      try {
+        return await fn();
+      } catch (e) {
+        attempt++;
+        if (attempt >= retries) rethrow;
+        await Future.delayed(delay);
+        delay *= 2;
+      }
+    }
+  }
+
+  // -------------------- SETORES (AGORA POR TEAMID) --------------------
+  void refreshSectorCache() => _sectorModelsCache = null;
+
+  Future<void> initFirebase() async {
+    // A criação de setores agora é por time, no getAllSectorModels.
+  }
+
+  Future<void> _ensureDefaultSectorsExist(String teamId) async {
+    final orderDocRef = _orderDoc(teamId);
+    final sectorsCol = _sectorsCol(teamId);
+
+    final orderDoc = await orderDocRef.get();
+    if (orderDoc.exists) return;
+
+    final List<String> defaultOrder = [];
+    final WriteBatch batch = _db.batch();
+
+    // kDefaultSectors deve ser importado ou definido em outro lugar
+    // Assumindo que kDefaultSectors existe e está acessível.
+    // for (final sectorData in kDefaultSectors) {
+    //   final sectorModel =
+    //       ConfigurableSector.fromMap(Map<String, dynamic>.from(sectorData));
+    //   final sectorRef = sectorsCol.doc(sectorModel.firestoreId);
+    //   batch.set(sectorRef, sectorModel.toMap());
+    //   defaultOrder.add(sectorModel.firestoreId);
+    // }
+
+    batch.set(orderDocRef, {'order': defaultOrder});
+    await batch.commit();
+  }
+
+  Future<List<ConfigurableSector>> getAllSectorModels(String teamId) async {
+    refreshSectorCache();
+
+    final orderDocRef = _orderDoc(teamId);
+    final sectorsCol = _sectorsCol(teamId);
+
+    final orderDoc = await orderDocRef.get();
+    if (!orderDoc.exists) {
+      await _ensureDefaultSectorsExist(teamId);
+    }
+
+    final sectorsSnapshot = await sectorsCol.get();
+    final orderDocAfter = await orderDocRef.get();
+
+    final Map<String, ConfigurableSector> allSectorsMap = {};
+    for (final doc in sectorsSnapshot.docs) {
+      try {
+        // --- CORREÇÃO DE CAST ---
+        final sector =
+            ConfigurableSector.fromMap(doc.data() as Map<String, dynamic>);
+        // --- FIM DA CORREÇÃO ---
+        allSectorsMap[sector.firestoreId] = sector;
+      } catch (_) {
+        continue;
+      }
+    }
+
+    // --- CORREÇÃO DE CAST ---
+    final List<String>? savedOrder =
+        ((orderDocAfter.data() as Map<String, dynamic>?)?['order'] as List?)
+            ?.cast<String>();
+    // --- FIM DA CORREÇÃO ---
+
+    final List<ConfigurableSector> orderedList = [];
+    if (savedOrder != null) {
+      for (final id in savedOrder) {
+        final sector = allSectorsMap[id];
+        if (sector != null) {
+          orderedList.add(sector);
+          allSectorsMap.remove(id);
+        }
+      }
+    }
+    orderedList.addAll(allSectorsMap.values);
+
+    _sectorModelsCache = LinkedHashMap.fromIterable(orderedList,
+        key: (s) => s.firestoreId, value: (s) => s);
+    return orderedList;
+  }
+
+  Future<void> saveSectorModel(ConfigurableSector sector, String teamId) async {
+    await _sectorsCol(teamId).doc(sector.firestoreId).set(sector.toMap());
+    final orderDocRef = _orderDoc(teamId);
+    await orderDocRef.set({
+      'order': FieldValue.arrayUnion([sector.firestoreId])
+    }, SetOptions(merge: true));
+    refreshSectorCache();
+  }
+
+  Future<void> deleteSectorModel(String firestoreId, String teamId) async {
+    await _sectorsCol(teamId).doc(firestoreId).delete();
+    final orderDocRef = _orderDoc(teamId);
+    await orderDocRef.update({
+      'order': FieldValue.arrayRemove([firestoreId])
+    });
+    refreshSectorCache();
+  }
+
+  Future<void> saveSectorOrder(List<String> orderedIds, String teamId) async {
+    try {
+      final orderDocRef = _orderDoc(teamId);
+      await orderDocRef.set({'order': orderedIds}, SetOptions(merge: true));
+      refreshSectorCache();
+    } catch (e) {
+      debugPrint('Erro ao salvar a ordem dos setores: $e');
+      rethrow;
+    }
+  }
+
+  ConfigurableSector? getSectorModelById(String sectorId) {
+    if (_sectorModelsCache == null) {
+      debugPrint(
+          "Aviso: getSectorModelById() chamado antes do cache de setores estar pronto.");
+      return null;
+    }
+    return _sectorModelsCache![sectorId];
+  }
+
+  Future<ConfigurableSector?> getSectorModelByIdAsync(
+      String sectorId, String teamId) async {
+    if (sectorId.isEmpty) return null;
+    if (_sectorModelsCache == null) {
+      await getAllSectorModels(teamId);
+    }
+    return _sectorModelsCache?[sectorId];
+  }
+
+  // -------------------- TICKET (AGORA POR TEAMID) --------------------
+  Future<void> _ensureTicketExists(
+      Map<String, dynamic> ticketData, String teamId) async {
+    final ticketRef =
+        _db.collection(kTicketsCollection).doc(ticketData['id'].toString());
+    final dataToSave = ticketData..['teamId'] = teamId;
+    await ticketRef.set(dataToSave, SetOptions(merge: true));
+  }
+
+  // -------------------- ENTRADA (CORRIGIDA - LINHA 263) --------------------
   Future<bool> entrada({
     required Map<String, dynamic> ticketData,
     required String sectorId,
+    required String teamId,
   }) async {
     final ticketId = ticketData['id'].toString();
 
-    // 1. Verifica se há ticket aberto em outro setor
-    String? setorAberto;
-    dynamic openKeyAberto; // Salva a chave para apagar
-    for (final k in _movBox.keys) {
-      if (k is String && k.startsWith('open::$ticketId::')) {
-        final parts = k.split('::');
-        if (parts.length == 3) {
-          setorAberto = parts[2];
-          openKeyAberto = k; // Salva a chave
-          break;
-        }
-      }
+    // ✅ DEPOIS (CORRETO): Usa o helper _movementsCol
+    final movementsCol = _movementsCol(teamId);
+
+    try {
+      await _retry(() async {
+        return await _db.runTransaction((tx) async {
+          // [REGRA MANTIDA] Verifica se a ficha já passou (foi fechada) neste setor
+          final historyQuery = await movementsCol
+              .where('teamId', isEqualTo: teamId)
+              .where('ticketId', isEqualTo: ticketId)
+              .where('sector', isEqualTo: sectorId)
+              .where('status', isEqualTo: 'closed')
+              .limit(1)
+              .get();
+          if (historyQuery.docs.isNotEmpty) {
+            throw Exception('Ficha já passou por este setor');
+          }
+
+          // [NOVA REGRA] Verifica se a ficha já está aberta NESTE setor (evita bip duplo)
+          // (Esta consulta vai exigir um novo índice no Firestore)
+          final alreadyOpenQuery = await movementsCol
+              .where('teamId', isEqualTo: teamId)
+              .where('ticketId', isEqualTo: ticketId)
+              .where('sector', isEqualTo: sectorId)
+              .where('status', isEqualTo: 'open')
+              .limit(1)
+              .get();
+          if (alreadyOpenQuery.docs.isNotEmpty) {
+            throw Exception('Ficha já está aberta NESTE setor');
+          }
+
+          // Cria o novo movimento
+          final newMovRef = movementsCol.doc();
+          tx.set(newMovRef, {
+            'teamId': teamId,
+            'ticketId': ticketId,
+            'sector': sectorId,
+            'status': 'open',
+            'pairs': ticketData['pairs'] ?? 0,
+            'inAt': FieldValue.serverTimestamp(),
+            'ticketData': ticketData,
+          });
+
+          // [REMOVIDO] Não atualizamos mais o 'ticket' com o
+          // 'currentMovementId', pois a ficha pode estar em vários lugares.
+        });
+      });
+
+      // Garante que os dados do ticket existem (ex: modelo, cor, etc.)
+      await _ensureTicketExists(ticketData, teamId);
+      return true;
+    } catch (e) {
+      debugPrint('entrada() falhou: $e');
+      return false;
     }
-
-    // Se estiver aberto em um setor que NÃO É "trânsito", bloqueia.
-    if (setorAberto != null && setorAberto != kTransitSectorId) return false;
-
-    // 2. Verifica histórico
-    final hk = _histKey(ticketId);
-    final hist = (_movBox.get(hk) as List?)?.cast<Map<String, dynamic>>() ??
-        <Map<String, dynamic>>[];
-    final jaSaiuDesteSetor = hist
-        .any((mov) => mov.containsKey('sector') && mov['sector'] == sectorId);
-    if (jaSaiuDesteSetor) return false;
-
-    // 3. APAGA o status "Em Trânsito" (se existir)
-    if (setorAberto == kTransitSectorId && openKeyAberto != null) {
-      await _movBox.delete(openKeyAberto);
-    }
-
-    // 4. Adiciona a nova entrada
-    await _movBox.put(_openKey(ticketId, sectorId), {
-      'ticketId': ticketId,
-      'sector': sectorId,
-      'pairs': ticketData['pairs'],
-      'inAt': DateTime.now().toIso8601String(),
-    });
-
-    // 5. Garante que o ticket existe
-    await _ensureTicketExists(ticketData);
-
-    return true;
   }
 
-  /// ATUALIZADO: Função de Saída
+  // -------------------- SAIDA (CORRIGIDA - LINHA 328) --------------------
   Future<bool> saida({
     required Map<String, dynamic> ticketData,
     required String sectorId,
+    required String teamId,
   }) async {
     final ticketId = ticketData['id'].toString();
-    final key = _openKey(ticketId, sectorId);
-    final open = _movBox.get(key);
-    if (open == null) return false;
 
-    final outAt = DateTime.now();
-    final movClosed = Map<String, dynamic>.from(open);
-    movClosed['outAt'] = outAt.toIso8601String();
-
-    // 1. Salva no histórico
-    final hk = _histKey(ticketId);
-    final hist = (_movBox.get(hk) as List?)?.cast<Map<String, dynamic>>() ??
-        <Map<String, dynamic>>[];
-    hist.add(movClosed);
-    await _movBox.put(hk, hist);
-
-    // 2. Remove o aberto E ADICIONA "EM TRÂNSITO"
-    await _movBox.delete(key);
-
-    // Cria o novo registro "Em Trânsito"
-    final newTransitData = Map<String, dynamic>.from(open);
-    newTransitData['sector'] =
-        kTransitSectorId; // Define o setor como "trânsito"
-    newTransitData['inAt'] =
-        outAt.toIso8601String(); // Atualiza o InAt para o momento que saiu
-
-    await _movBox.put(_openKey(ticketId, kTransitSectorId), newTransitData);
-    // FIM DA MUDANÇA
-
-    // 3. Atualiza produção diária
-    final ymd = _ymd(outAt);
-    final pk = _prodKey(sectorId, ymd);
-    final current = (_dailyBox.get(pk) as int?) ?? 0;
-    final produced = (open['pairs'] as int?) ?? (ticketData['pairs'] as int);
-    await _dailyBox.put(pk, current + produced);
-
-    return true;
-  }
-
-  // -------------------- AUXILIARES --------------------
-
-  Future<void> _ensureTicketExists(Map<String, dynamic> ticketData) async {
-    final all = HiveService.getAllTickets();
-    final exists = all.any((e) => e.id == ticketData['id']);
-    if (exists) return;
+    // ✅ DEPOIS (CORRETO): Usa o helper _movementsCol
+    final movementsCol = _movementsCol(teamId);
 
     try {
-      const ticketsBoxName = 'tickets_box';
-      if (Hive.isBoxOpen(ticketsBoxName)) {
-        final box = Hive.box(ticketsBoxName);
-        await box.put(ticketData['id'].toString(), ticketData);
-      }
-    } catch (_) {
-      // noop
+      await _retry(() async {
+        return await _db.runTransaction((tx) async {
+          // Buscamos o movimento aberto específico para ESTA ficha NESTE setor
+          // (Esta consulta vai exigir um novo índice no Firestore)
+          final openMovementQuery = await movementsCol
+              .where('teamId', isEqualTo: teamId)
+              .where('ticketId', isEqualTo: ticketId)
+              .where('sector', isEqualTo: sectorId)
+              .where('status', isEqualTo: 'open')
+              .limit(1)
+              .get();
+
+          if (openMovementQuery.docs.isEmpty) {
+            throw Exception(
+                'Ficha não encontrada ou não está aberta neste setor');
+          }
+
+          // Encontramos o movimento a ser fechado
+          final openMovRef = openMovementQuery.docs.first.reference;
+          // final openData =
+          //     openMovementQuery.docs.first.data() as Map<String, dynamic>; // Não é usado
+
+          // Fechamos o movimento
+          tx.update(openMovRef, {
+            'status': 'closed',
+            'outAt': FieldValue.serverTimestamp(),
+          });
+
+          // [BLOCO REMOVIDO]
+          // Não criamos mais um movimento de 'transito' e
+          // não atualizamos mais o 'ticket'.
+        });
+      });
+
+      // [LÓGICA MANTIDA] Atualiza a produção diária
+      final outAt = DateTime.now();
+      final ymd = _ymd(outAt);
+      final pk = '$teamId::$sectorId::$ymd';
+
+      final dailyProdRef = _db.collection(kDailyProductionCollection).doc(pk);
+      await dailyProdRef.set({
+        'count': FieldValue.increment(ticketData['pairs'] ?? 0),
+        'sectorId': sectorId,
+        'teamId': teamId,
+        'date': ymd,
+      }, SetOptions(merge: true));
+
+      return true;
+    } catch (e) {
+      debugPrint('saida() falhou: $e');
+      return false;
     }
   }
 
-  List<Map<String, dynamic>> getOpenMovements(String sectorId) {
-    final result = <Map<String, dynamic>>[];
-    for (final k in _movBox.keys) {
-      if (k is String && k.startsWith('open::')) {
-        final parts = k.split('::');
-        if (parts.length == 3 && parts[2] == sectorId) {
-          result.add(Map<String, dynamic>.from(_movBox.get(k)));
+  // -------------------- AUXILIARES (Leitura, AGORA POR TEAMID) --------------------
+
+  Map<String, dynamic>? parseQrCode(String raw) {
+    try {
+      final decoded = json.decode(raw);
+      if (decoded is Map) {
+        final map = decoded;
+        final id = (map['id'] ?? map['ticketId'] ?? '').toString();
+        final modelo = (map['modelo'] ?? '').toString();
+        final cor = (map['cor'] ?? '').toString();
+        final marca = (map['marca'] ?? '').toString();
+        final pairs =
+            int.tryParse((map['pairs'] ?? map['total'] ?? '0').toString()) ?? 0;
+        if (id.isNotEmpty && pairs > 0) {
+          return {
+            'id': id,
+            'modelo': modelo,
+            'cor': cor,
+            'marca': marca,
+            'pairs': pairs,
+          };
         }
       }
+    } catch (_) {}
+    final parts = raw.split('|');
+    if (parts.length >= 6 && parts[0].toUpperCase() == 'TK') {
+      final id = parts[1].trim();
+      final modelo = parts[2].trim();
+      final cor = parts[3].trim();
+      final marca = parts[4].trim();
+      final pairs = int.tryParse(parts[5].trim()) ?? 0;
+      if (id.isNotEmpty && pairs > 0) {
+        return {
+          'id': id,
+          'modelo': modelo,
+          'cor': cor,
+          'marca': marca,
+          'pairs': pairs,
+        };
+      }
     }
-    return result;
+    return null;
   }
 
-  int getDailyProduction(String sectorId, DateTime date) {
-    final pk = _prodKey(sectorId, _ymd(date));
-    return (_dailyBox.get(pk) as int?) ?? 0;
-  }
-
-  /// Soma os pares de todas as fichas abertas nesse setor
-  int getFichasEmProducao(String firestoreId) {
-    final openMovements = getOpenMovements(firestoreId);
-    int totalPares = 0;
-    for (final movement in openMovements) {
-      totalPares += (movement['pairs'] as int?) ?? 0;
+  Future<Map<String, dynamic>?> getTicketDataFromFirebase(
+      String ticketId) async {
+    try {
+      final docSnap =
+          await _db.collection(kTicketsCollection).doc(ticketId).get();
+      if (docSnap.exists) {
+        // --- CORREÇÃO DE CAST ---
+        final data = docSnap.data() as Map<String, dynamic>;
+        // --- FIM DA CORREÇÃO ---
+        data['id'] ??= docSnap.id;
+        data['pairs'] ??= int.tryParse((data['total'] ?? '0').toString()) ?? 0;
+        data['modelo'] ??= '';
+        data['cor'] ??= '';
+        data['marca'] ??= '';
+        return data;
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Erro em getTicketDataFromFirebase: $e');
+      return null;
     }
-    return totalPares;
   }
 
-  /// Pega a produção diária para a data de "hoje"
-  int getProducaoDoDia(String firestoreId) {
-    // Chama a função já existente, mas com a data de "hoje"
-    return getDailyProduction(firestoreId, DateTime.now());
+  // -------------------------------------------------------------
+  // === NOVO MÉTODO PARA BUSCAR O HISTÓRICO DE 7 DIAS (PARA O GRÁFICO) ===
+  // -------------------------------------------------------------
+  Future<Map<String, int>> getSevenDayProductionHistory(
+      String sectorId, String teamId) async {
+    final Map<String, int> history = LinkedHashMap();
+    final now = DateTime.now();
+
+    for (int i = 6; i >= 0; i--) {
+      final date = now.subtract(Duration(days: i));
+      final ymd = _ymd(date);
+
+      final production = await getDailyProduction(sectorId, date, teamId);
+      history[ymd] = production;
+    }
+
+    return history;
+  }
+  // -------------------------------------------------------------
+  // === FIM DO NOVO MÉTODO ===
+  // -------------------------------------------------------------
+
+  Future<List<Map<String, dynamic>>> getOpenMovements(
+      String sectorId, String teamId) async {
+    final query = _db
+        .collection(kMovementsCollection)
+        .where('teamId', isEqualTo: teamId)
+        .where('sector', isEqualTo: sectorId)
+        .where('status', isEqualTo: 'open');
+    final snapshot = await query.get();
+    // --- CORREÇÃO: Sem cast desnecessário ---
+    return snapshot.docs.map((d) => d.data()).toList();
   }
 
-  // ---------------------------------------------------
-  // --- MÉTODOS DE RELATÓRIO DE PRODUÇÃO ---
-  // ---------------------------------------------------
+  Future<List<Map<String, dynamic>>> getClosedMovements(
+      String sectorId, String teamId) async {
+    final snapshot = await _db
+        .collection(kMovementsCollection)
+        .where('teamId', isEqualTo: teamId)
+        .where('sector', isEqualTo: sectorId)
+        .where('status', isEqualTo: 'closed')
+        .get();
+    // --- CORREÇÃO: Sem cast desnecessário ---
+    return snapshot.docs.map((d) => d.data()).toList();
+  }
 
-  /// Gera um relatório de produção para um período e setores específicos.
-  ProductionReport generateProductionReport({
+  Future<int> getDailyProduction(
+      String sectorId, DateTime date, String teamId) async {
+    final pk = '$teamId::$sectorId::${_ymd(date)}';
+    final docSnap =
+        await _db.collection(kDailyProductionCollection).doc(pk).get();
+    if (!docSnap.exists) return 0;
+
+    // --- CORREÇÃO DE CAST ---
+    final data = docSnap.data() as Map<String, dynamic>?;
+    if (data?['teamId'] != teamId) return 0;
+    return (data?['count'] as int?) ?? 0;
+    // --- FIM DA CORREÇÃO ---
+  }
+
+  Future<int> getFichasEmProducao(String firestoreId, String teamId) async {
+    final query = _db
+        .collection(kMovementsCollection)
+        .where('teamId', isEqualTo: teamId)
+        .where('sector', isEqualTo: firestoreId)
+        .where('status', isEqualTo: 'open');
+
+    final snapshot = await query.get();
+    int sum = 0;
+    for (final doc in snapshot.docs) {
+      // --- CORREÇÃO DE CAST ---
+      sum += (doc.data()['pairs'] as int?) ?? 0;
+      // --- FIM DA CORREÇÃO ---
+    }
+    return sum;
+  }
+
+  Future<int> getProducaoDoDia(String firestoreId, String teamId) async {
+    return getDailyProduction(firestoreId, DateTime.now(), teamId);
+  }
+
+  // -------------------- STREAMS (AGORA POR TEAMID) --------------------
+
+  Stream<List<ConfigurableSector>> getAllSectorModelsStream(String teamId) {
+    return _orderDoc(teamId).snapshots().asyncMap((_) {
+      return getAllSectorModels(teamId);
+    });
+  }
+
+  Stream<List<Map<String, dynamic>>> getAllActiveBottlenecksStream(
+      String teamId) {
+    return _db
+        .collection(kActiveBottlenecksCollection)
+        .where('teamId', isEqualTo: teamId)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((d) => d.data())
+            .toList()); // <-- CORREÇÃO: Sem cast
+  }
+
+  Stream<List<Map<String, dynamic>>> getAllWorkInProgressFichasStream(
+      String teamId) {
+    return _db
+        .collection(kMovementsCollection)
+        .where('teamId', isEqualTo: teamId)
+        // [ALTERADO] Removemos 'transito'
+        .where('status', isEqualTo: 'open')
+        .orderBy('inAt', descending: true)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((d) => d.data())
+            .toList()); // <-- CORREÇÃO: Sem cast
+  }
+
+  Stream<int> getProducaoDoDiaStream(String firestoreId, String teamId) {
+    if (firestoreId.isEmpty) return Stream.value(0);
+    final pk = '$teamId::$firestoreId::${_ymd(DateTime.now())}';
+    return _db
+        .collection(kDailyProductionCollection)
+        .doc(pk)
+        .snapshots()
+        .map((doc) {
+      if (!doc.exists) return 0;
+      // --- CORREÇÃO DE CAST ---
+      final data = doc.data() as Map<String, dynamic>?;
+      if (data?['teamId'] != teamId) return 0;
+      return (data?['count'] as int?) ?? 0;
+      // --- FIM DA CORREÇÃO ---
+    });
+  }
+
+  Stream<int> getFichasEmProducaoStream(String firestoreId, String teamId) {
+    return _db
+        .collection(kMovementsCollection)
+        .where('teamId', isEqualTo: teamId)
+        .where('sector', isEqualTo: firestoreId)
+        .where('status', isEqualTo: 'open')
+        .snapshots()
+        .map((snapshot) {
+      int sum = 0;
+      for (final doc in snapshot.docs) {
+        // --- CORREÇÃO DE CAST ---
+        sum += (doc.data()['pairs'] as int?) ?? 0;
+        // --- FIM DA CORREÇÃO ---
+      }
+      return sum;
+    });
+  }
+
+  // -------------------- RELATÓRIOS (AGORA POR TEAMID) --------------------
+  Future<ProductionReport> generateProductionReport({
     required DateTime startDate,
     required DateTime endDate,
-    required List<String>
-        sectorIds, // Lista de IDs de setores (ex: 'corte', 'montagem')
-    required Map<String, String>
-        sectorNames, // Mapa de ID para Nome (ex: {'corte': 'Corte'})
-  }) {
-    // Ajusta a data final para incluir o dia inteiro (até 23:59:59)
+    required List<String> sectorIds,
+    required Map<String, String> sectorNames,
+    required String teamId,
+  }) async {
     final endDateAdjusted =
         DateTime(endDate.year, endDate.month, endDate.day, 23, 59, 59);
 
@@ -222,57 +567,53 @@ class ProductionManager {
     int grandTotalInProduction = 0;
     final List<SectorReportData> allSectorData = [];
 
-    // 1. Itera sobre cada setor que o usuário selecionou
-    for (final sectorId in sectorIds) {
-      int sectorProduced = 0;
-      final List<Map<String, dynamic>> sectorFinalizedFichas = [];
+    // 🔴 FALHA CORRIGIDA AQUI: Usando objetos DateTime para o Firestore
+    final movementsSnapshot = await _movementsCol(teamId)
+        .where('teamId', isEqualTo: teamId) // Redundante, mas OK
+        .where('status', isEqualTo: 'closed')
+        .where('outAt', isGreaterThanOrEqualTo: startDate) // 🟢 CORRIGIDO
+        .where('outAt', isLessThanOrEqualTo: endDateAdjusted) // 🟢 CORRIGIDO
+        .get();
 
-      // 2. Calcula "PRODUZIDO NO PERÍODO" (lendo o histórico)
-      for (final key in _movBox.keys) {
-        if (key is String && key.startsWith('hist::')) {
-          final histList = _movBox.get(key) as List?;
-          if (histList == null) continue;
-
-          for (final movement in histList) {
-            if (movement is Map) {
-              if (movement['sector'] == sectorId && movement['outAt'] != null) {
-                try {
-                  final outAtDate = DateTime.parse(movement['outAt']);
-                  if (!outAtDate.isBefore(startDate) &&
-                      outAtDate.isBefore(endDateAdjusted)) {
-                    final pairs = (movement['pairs'] as int?) ?? 0;
-                    sectorProduced += pairs;
-                    sectorFinalizedFichas
-                        .add(Map<String, dynamic>.from(movement));
-                  }
-                } catch (_) {}
-              }
-            }
-          }
+    final Map<String, List<Map<String, dynamic>>> closedBySector = {};
+    for (final doc in movementsSnapshot.docs) {
+      // --- CORREÇÃO DE CAST ---
+      final m = doc.data() as Map<String, dynamic>;
+      // --- FIM DA CORREÇÃO ---
+      if (m['status'] == 'closed') {
+        final sid = m['sector'] ?? 'desconhecido';
+        // É necessário filtrar por setor no cliente, pois não se pode combinar
+        // consultas de intervalo (data) com consultas array-contains-any (setores).
+        if (sectorIds.contains(sid)) {
+          closedBySector.putIfAbsent(sid, () => []).add(m);
         }
       }
+    }
 
-      // 3. Calcula "EM PRODUÇÃO ATUALMENTE"
-      final sectorInProduction = getFichasEmProducao(sectorId);
-      final sectorOpenFichas = getOpenMovements(sectorId);
+    for (final sectorId in sectorIds) {
+      int sectorProduced = 0;
+      final sectorFinalizedFichas = closedBySector[sectorId] ?? [];
 
-      // 4. Adiciona os dados deste setor à lista
-      allSectorData.add(
-        SectorReportData(
-          sectorId: sectorId,
-          sectorName: sectorNames[sectorId] ?? sectorId,
-          producedInRange: sectorProduced,
-          finalizedFichasInRange: sectorFinalizedFichas,
-          currentlyInProduction: sectorInProduction,
-          openFichas: sectorOpenFichas,
-        ),
-      );
+      for (final movement in sectorFinalizedFichas) {
+        sectorProduced += (movement['pairs'] as int?) ?? 0;
+      }
+
+      final sectorInProduction = await getFichasEmProducao(sectorId, teamId);
+      final sectorOpenFichas = await getOpenMovements(sectorId, teamId);
+
+      allSectorData.add(SectorReportData(
+        sectorId: sectorId,
+        sectorName: sectorNames[sectorId] ?? sectorId,
+        producedInRange: sectorProduced,
+        finalizedFichasInRange: sectorFinalizedFichas,
+        currentlyInProduction: sectorInProduction,
+        openFichas: sectorOpenFichas,
+      ));
 
       grandTotalProduced += sectorProduced;
       grandTotalInProduction += sectorInProduction;
     }
 
-    // 5. Retorna o relatório completo
     return ProductionReport(
       startDate: startDate,
       endDate: endDate,
@@ -282,122 +623,116 @@ class ProductionManager {
     );
   }
 
-  // ---------------------------------------------------
-  // --- MÉTODOS DE GARGALO ---
-  // ---------------------------------------------------
-
-  /// Lista de motivos padrão para o diálogo de gargalo
+  // -------------------- GARGALOS (AGORA POR TEAMID) --------------------
   final List<String> kBottleneckReasons = [
     'Faltou funcionário',
     'Máquina estragada',
     'Falta de Energia',
     'Acidente de trabalho',
-    kMissingPartReason, // <-- Esta linha agora usa a constante corrigida
-    kOtherReason, // <-- Esta linha agora usa a constante corrigida
+    kMissingPartReason,
+    kOtherReason,
   ];
 
-  /// Cria um novo gargalo
   Future<void> createBottleneck({
     required String sectorId,
     required String reason,
+    required String teamId,
     String? customReason,
-    String? partName, // <-- NOVO CAMPO
+    String? partName,
   }) async {
-    final key = DateTime.now().toIso8601String();
+    final key = _db.collection(kActiveBottlenecksCollection).doc().id;
     final data = {
-      'id': key, // <-- Salva a própria chave para referência
+      'id': key,
+      'teamId': teamId,
       'sectorId': sectorId,
       'reason': reason,
       'customReason': customReason,
-      'partName': partName, // <-- Salva o nome da peça
-      'startedAt': key,
+      'partName': partName,
+      'startedAt': FieldValue.serverTimestamp(),
     };
-    await _activeBottlenecksBox.put(key, data);
+    await _db.collection(kActiveBottlenecksCollection).doc(key).set(data);
   }
 
-  /// Resolve um gargalo ativo
   Future<void> resolveBottleneck({required String bottleneckKey}) async {
-    final activeData = _activeBottlenecksBox.get(bottleneckKey);
-    if (activeData == null) return;
-    final resolvedData = Map<String, dynamic>.from(activeData);
-    resolvedData['resolvedAt'] = DateTime.now().toIso8601String();
-    await _historyBottlenecksBox.add(resolvedData);
-    await _activeBottlenecksBox.delete(bottleneckKey);
-  }
+    final activeRef =
+        _db.collection(kActiveBottlenecksCollection).doc(bottleneckKey);
+    final historyRef =
+        _db.collection(kHistoryBottlenecksCollection).doc(bottleneckKey);
 
-  /// Pega TODOS os gargalos ativos de um setor específico
-  List<Map<String, dynamic>> getActiveBottlenecksForSector(String sectorId) {
-    return _activeBottlenecksBox.values
-        .where((data) => (data as Map)['sectorId'] == sectorId)
-        .map((e) => Map<String, dynamic>.from(e as Map))
-        .toList();
-  }
-
-  /// Pega TODOS os gargalos ativos (para o banner de alerta)
-  List<Map<String, dynamic>> getAllActiveBottlenecks() {
-    return _activeBottlenecksBox.values
-        .map((e) => Map<String, dynamic>.from(e as Map))
-        .toList();
-  }
-
-  // ---------------------------------------------------
-  // --- NOVAS FUNÇÕES ADICIONADAS (SUGESTÕES 2 e 3) ---
-  // ---------------------------------------------------
-
-  /**
-   * SUGESTÃO 3: Painel de Fichas Abertas (WIP)
-   * Busca todas as fichas que estão atualmente "abertas" (open::)
-   * em qualquer setor.
-   */
-  List<Map<String, dynamic>> getAllWorkInProgressFichas() {
-    final wipFichas = <Map<String, dynamic>>[];
-    for (final key in _movBox.keys) {
-      if (key is String && key.startsWith('open::')) {
-        wipFichas.add(Map<String, dynamic>.from(_movBox.get(key)));
-      }
+    try {
+      await _db.runTransaction((tx) async {
+        final activeDoc = await tx.get(activeRef);
+        if (!activeDoc.exists) return;
+        // --- CORREÇÃO DE CAST ---
+        final resolvedData = activeDoc.data() as Map<String, dynamic>;
+        // --- FIM DA CORREÇÃO ---
+        resolvedData['resolvedAt'] = FieldValue.serverTimestamp();
+        tx.set(historyRef, resolvedData);
+        tx.delete(activeRef);
+      });
+    } catch (e) {
+      debugPrint('Erro ao resolver gargalo: $e');
     }
-    // Ordena pela data de entrada, as mais recentes primeiro
-    wipFichas
-        .sort((a, b) => (b['inAt'] as String).compareTo(a['inAt'] as String));
-    return wipFichas;
   }
 
-  /**
-   * SUGESTÃO 2: Relatório de Histórico de Gargalos
-   * Analisa a 'bottlenecks_history_box' e agrupa os
-   * problemas por motivo e tempo total perdido.
-   */
-  BottleneckReport generateBottleneckReport({
+  Future<List<Map<String, dynamic>>> getActiveBottlenecksForSector(
+      String sectorId, String teamId) async {
+    final snapshot = await _db
+        .collection(kActiveBottlenecksCollection)
+        .where('teamId', isEqualTo: teamId)
+        .where('sectorId', isEqualTo: sectorId)
+        .get();
+    // --- CORREÇÃO: Sem cast desnecessário ---
+    return snapshot.docs.map((d) => d.data()).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> getAllActiveBottlenecks(
+      String teamId) async {
+    final snapshot = await _db
+        .collection(kActiveBottlenecksCollection)
+        .where('teamId', isEqualTo: teamId)
+        .get();
+    // --- CORREÇÃO: Sem cast desnecessário ---
+    return snapshot.docs.map((d) => d.data()).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> getAllWorkInProgressFichas(
+      String teamId) async {
+    final snapshot = await _db
+        .collection(kMovementsCollection)
+        .where('teamId', isEqualTo: teamId)
+        // [ALTERADO] Removemos 'transito'
+        .where('status', isEqualTo: 'open')
+        .orderBy('inAt', descending: true)
+        .get();
+    // --- CORREÇÃO: Sem cast desnecessário ---
+    return snapshot.docs.map((d) => d.data()).toList();
+  }
+
+  Future<BottleneckReport> generateBottleneckReport({
     required DateTime startDate,
     required DateTime endDate,
-  }) {
-    // Ajusta a data final para incluir o dia inteiro (até 23:59:59)
+    required Map<String, String> sectorNames,
+    required String teamId,
+  }) async {
     final endDateAdjusted =
         DateTime(endDate.year, endDate.month, endDate.day, 23, 59, 59);
 
-    final resolvedInPeriod = <Map<String, dynamic>>[];
-    // 1. Filtra todos os gargalos resolvidos dentro do período
-    for (final data in _historyBottlenecksBox.values) {
-      final resolvedData = Map<String, dynamic>.from(data as Map);
-      if (resolvedData['resolvedAt'] == null) continue;
+    // 🔴 FALHA CORRIGIDA AQUI: Usando objetos DateTime para o Firestore
+    final snapshot = await _db
+        .collection(kHistoryBottlenecksCollection)
+        .where('teamId', isEqualTo: teamId)
+        .where('resolvedAt', isGreaterThanOrEqualTo: startDate) // 🟢 CORRIGIDO
+        .where('resolvedAt',
+            isLessThanOrEqualTo: endDateAdjusted) // 🟢 CORRIGIDO
+        .get();
 
-      try {
-        final resolvedDate = DateTime.parse(resolvedData['resolvedAt']);
-        // Compara se foi resolvido dentro do range
-        if (!resolvedDate.isBefore(startDate) &&
-            resolvedDate.isBefore(endDateAdjusted)) {
-          resolvedInPeriod.add(resolvedData);
-        }
-      } catch (_) {
-        // Ignora datas inválidas
-      }
-    }
+    // --- CORREÇÃO: Sem cast desnecessário ---
+    final resolvedInPeriod =
+        snapshot.docs.map((d) => d.data() as Map<String, dynamic>).toList();
 
-    // 2. Agrupa os gargalos filtrados por motivo
     final summaryMap = <String, BottleneckSummaryItem>{};
-
     for (final bottleneck in resolvedInPeriod) {
-      // Define uma "chave" única para o motivo
       String reasonKey = bottleneck['reason'];
       if (reasonKey == kOtherReason) {
         reasonKey = bottleneck['customReason'] ?? kOtherReason;
@@ -405,125 +740,78 @@ class ProductionManager {
         reasonKey =
             '$kMissingPartReason: ${bottleneck['partName'] ?? 'Não especificada'}';
       }
-
-      // Calcula a duração do gargalo
+      final String sectorId = bottleneck['sectorId'] ?? 'desconhecido';
+      final String sectorName = sectorNames[sectorId] ?? sectorId;
+      final String compoundKey = '$sectorId::$reasonKey';
+      final String displayReason = '$sectorName: $reasonKey';
       Duration duration = Duration.zero;
       try {
-        final started = DateTime.parse(bottleneck['startedAt']);
-        final resolved = DateTime.parse(bottleneck['resolvedAt']);
+        final started = (bottleneck['startedAt'] as Timestamp).toDate();
+        final resolved = (bottleneck['resolvedAt'] as Timestamp).toDate();
         duration = resolved.difference(started);
-      } catch (_) {
-        // Ignora se não puder calcular a duração
+      } catch (e) {
+        try {
+          // Lógica de fallback para strings, caso o formato seja misto (legacy data)
+          final started = DateTime.parse(bottleneck['startedAt']);
+          final resolved = DateTime.parse(bottleneck['resolvedAt']);
+          duration = resolved.difference(started);
+        } catch (_) {}
       }
-
-      // Adiciona ou atualiza o item no mapa de resumo
-      if (summaryMap.containsKey(reasonKey)) {
-        // Se já existe, soma
-        final item = summaryMap[reasonKey]!;
+      if (summaryMap.containsKey(compoundKey)) {
+        final item = summaryMap[compoundKey]!;
         item.count++;
         item.totalDuration += duration;
       } else {
-        // Se é novo, cria
-        summaryMap[reasonKey] = BottleneckSummaryItem(
-          reason: reasonKey,
+        summaryMap[compoundKey] = BottleneckSummaryItem(
+          reason: displayReason,
           count: 1,
           totalDuration: duration,
         );
       }
     }
 
-    // 3. Ordena o resultado (do mais demorado para o menos)
     final summaryList = summaryMap.values.toList();
     summaryList.sort((a, b) => b.totalDuration.compareTo(a.totalDuration));
 
-    // 4. Retorna o relatório completo
     return BottleneckReport(
       startDate: startDate,
       endDate: endDate,
       summary: summaryList,
-      rawData: resolvedInPeriod, // Lista de todos os gargalos no período
+      rawData: resolvedInPeriod,
     );
   }
-} // <-- FIM DA CLASSE ProductionManager
 
-// ---------------------------------------------------
-// --- MODELOS DE RELATÓRIO DE PRODUÇÃO (Existentes) ---
-// ---------------------------------------------------
+  // 🟢 NOVO MÉTODO: Essencial para o detalhamento dia-a-dia na ReportPage.
+  // Ele busca movimentos no período, filtrando por um campo de data ('inAt' ou 'outAt').
+  Future<List<Map<String, dynamic>>> getDetailedMovementsForReport({
+    required String teamId,
+    required List<String> sectorIds,
+    required DateTime startDate,
+    required DateTime endDateAdjusted,
+    required String dateField,
+  }) async {
+    if (sectorIds.isEmpty) return [];
 
-/// Contém o resultado completo do relatório de produção.
-class ProductionReport {
-  final DateTime startDate;
-  final DateTime endDate;
-  final List<SectorReportData> sectorData;
+    try {
+      // 🟢 CORREÇÃO CRÍTICA: Passando DateTime em vez de String
+      final query = _movementsCol(teamId)
+          .where(dateField, isGreaterThanOrEqualTo: startDate)
+          .where(dateField, isLessThanOrEqualTo: endDateAdjusted)
+          .orderBy(dateField, descending: false);
 
-  // Totais gerais
-  final int totalProducedInRange;
-  final int totalCurrentlyInProduction;
+      final movementsSnapshot = await query.get();
 
-  ProductionReport({
-    required this.startDate,
-    required this.endDate,
-    required this.sectorData,
-    required this.totalProducedInRange,
-    required this.totalCurrentlyInProduction,
-  });
-}
+      // Filtrar setores no cliente (necessário por causa da restrição do Firestore)
+      final allMovements = movementsSnapshot.docs
+          .map((doc) => doc.data() as Map<String, dynamic>)
+          .where((data) => sectorIds.contains(data['sector']))
+          .toList();
 
-/// Contém os dados de um setor específico.
-class SectorReportData {
-  final String sectorId;
-  final String sectorName;
-
-  // O que foi produzido (finalizado) no período
-  final int producedInRange;
-  final List<Map<String, dynamic>> finalizedFichasInRange;
-
-  // O que está em produção (aberto) agora
-  final int currentlyInProduction;
-  final List<Map<String, dynamic>> openFichas;
-
-  SectorReportData({
-    required this.sectorId,
-    required this.sectorName,
-    required this.producedInRange,
-    required this.finalizedFichasInRange,
-    required this.currentlyInProduction,
-    required this.openFichas,
-  });
-}
-
-// ---------------------------------------------------
-// --- NOVOS MODELOS DE RELATÓRIO DE GARGALOS ---
-// ---------------------------------------------------
-
-/// Contém o resultado completo do relatório de gargalos.
-class BottleneckReport {
-  final DateTime startDate;
-  final DateTime endDate;
-
-  /// Uma lista resumida, agrupada por motivo.
-  final List<BottleneckSummaryItem> summary;
-
-  /// A lista completa de todos os gargalos no período.
-  final List<Map<String, dynamic>> rawData;
-
-  BottleneckReport({
-    required this.startDate,
-    required this.endDate,
-    required this.summary,
-    required this.rawData,
-  });
-}
-
-/// Representa um único item no resumo do relatório de gargalos.
-class BottleneckSummaryItem {
-  final String reason;
-  int count;
-  Duration totalDuration;
-
-  BottleneckSummaryItem({
-    required this.reason,
-    this.count = 0,
-    this.totalDuration = Duration.zero,
-  });
+      return allMovements;
+    } catch (e) {
+      debugPrint(
+          'Erro ao buscar movimentos detalhados (getDetailedMovementsForReport): $e');
+      rethrow;
+    }
+  }
 }

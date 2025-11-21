@@ -1,64 +1,53 @@
-﻿import 'package:flutter/material.dart';
-import 'package:hive_flutter/hive_flutter.dart';
-import 'package:flutter_localizations/flutter_localizations.dart'; // <-- 1. IMPORT ADICIONADO
-
-// Páginas
-import 'pages/dashboard_page.dart';
-import 'pages/create_ticket_page.dart';
-
-// Hive + Repositórios
-import 'services/hive_service.dart';
-import 'data/adapters.dart';
-import 'data/stats_repository.dart';
-import 'data/material_repository.dart'; // <-- NOVO IMPORT
-
-// Gerenciador de produção
-import 'services/production_manager.dart';
-
-// Constantes de boxes
-const String kMovementsBox = 'movements_box';
-const String kSectorDailyBox = 'sector_daily';
-// --- ADICIONADO PARA GARGALOS ---
-const String kBottlenecksActiveBox = 'bottlenecks_active_box';
-const String kBottlenecksHistoryBox = 'bottlenecks_history_box';
-// ---------------------------------
+﻿import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:gestor_calcados_new/pages/auth_wrapper_page.dart';
+import 'package:gestor_calcados_new/firebase_options.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:gestor_calcados_new/services/production_manager.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Inicializa o Hive para Flutter
-  await Hive.initFlutter();
+  // ✅ CORREÇÃO 1: Capturar erros ANTES de inicializar Firebase
+  if (kDebugMode) {
+    FlutterError.onError = (FlutterErrorDetails details) {
+      FlutterError.presentError(details);
+      debugPrint('🔥 ERRO FLUTTER: ${details.exception}');
+      debugPrint('📋 Stack: ${details.stack}');
+    };
+  }
 
-  // 2. Registra TODOS os adapters gerados
-  await registerHiveAdapters();
+  try {
+    // ✅ CORREÇÃO 2: Inicializar Firebase PRIMEIRO
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
 
-  // 3. Inicializa os serviços e repositórios
-  await HiveService.init();
-  await StatsRepository().init();
-  await MaterialRepository().init(); // <-- NOVA INICIALIZAÇÃO
+    // ✅ CORREÇÃO 3: Configurar Firestore DEPOIS do Firebase inicializado
+    if (kDebugMode) {
+      FirebaseFirestore.instance.settings = const Settings(
+        persistenceEnabled: true,
+        cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+      );
+    }
 
-  // --- ADICIONADO: Abrir boxes de gargalo ---
-  await Hive.openBox<dynamic>(kBottlenecksActiveBox);
-  await Hive.openBox<dynamic>(kBottlenecksHistoryBox);
-  // ------------------------------------------
+    // ✅ CORREÇÃO 4: Inicializar ProductionManager (opcional)
+    await ProductionManager.instance.initFirebase();
 
-  // 4. Inicializa o ProductionManager com as boxes já abertas
-  final movementsBox = await Hive.openBox<dynamic>(kMovementsBox);
-  final dailyBox = await Hive.openBox<dynamic>(kSectorDailyBox);
+    debugPrint('✅ Firebase inicializado com sucesso');
+  } catch (e, stackTrace) {
+    debugPrint('❌ ERRO ao inicializar Firebase: $e');
+    debugPrint('Stack: $stackTrace');
+  }
 
-  // 2. CORREÇÃO: Usando a instância singleton .instance
-  await ProductionManager.instance.initHiveBoxes(
-    eventsBox: movementsBox,
-    countersBox: dailyBox,
-  );
-
-  // 5. Roda o app
+  // ✅ Roda o app
   runApp(const MyApp());
 }
 
 class Routes {
-  static const dashboard = '/';
-  static const createTicket = '/create-ticket';
+  static const login = '/';
 }
 
 class MyApp extends StatelessWidget {
@@ -73,8 +62,6 @@ class MyApp extends StatelessWidget {
         useMaterial3: true,
         colorSchemeSeed: const Color(0xFF223147),
       ),
-
-      // --- 3. ADIÇÃO: Configuração de Localização (pt-BR) ---
       locale: const Locale('pt', 'BR'),
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
@@ -84,12 +71,9 @@ class MyApp extends StatelessWidget {
       supportedLocales: const [
         Locale('pt', 'BR'),
       ],
-      // ---------------------------------------------------
-
-      initialRoute: Routes.dashboard,
+      initialRoute: Routes.login,
       routes: {
-        Routes.dashboard: (_) => const DashboardPage(),
-        Routes.createTicket: (_) => const CreateTicketPage(),
+        Routes.login: (_) => const AuthWrapperPage(),
       },
     );
   }

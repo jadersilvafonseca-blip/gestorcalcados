@@ -16,22 +16,13 @@ class MaterialItemAdapter extends TypeAdapter<MaterialItem> {
     final fields = <int, dynamic>{
       for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
     };
-
-    // Leitura defensiva: trata nulls e converte num -> double se necessário
-    final id = (fields[0] as String?) ?? '';
-    final name = (fields[1] as String?) ?? '';
-    final colors = (fields[2] as List?)?.cast<String>() ?? <String>[];
-    final supplier = (fields[3] as String?) ?? '';
-    final price = (fields[4] as num?)?.toDouble() ?? 0.0;
-    final height = (fields[5] as num?)?.toDouble() ?? 1.4;
-
     return MaterialItem(
-      name: name,
-      id: id.isEmpty ? name.toLowerCase().trim() : id,
-      colors: colors,
-      supplier: supplier,
-      price: price,
-      height: height,
+      name: fields[1] as String,
+      id: fields[0] as String?,
+      colors: (fields[2] as List?)?.cast<String>(),
+      supplier: fields[3] as String,
+      price: fields[4] as double?,
+      height: fields[5] as double?,
     );
   }
 

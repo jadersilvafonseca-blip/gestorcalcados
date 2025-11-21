@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "763952289739",
+    "project_id": "atual-a0c17",
+    "storage_bucket": "atual-a0c17.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:763952289739:android:242111a21b8ec36e31884e",
+        "android_client_info": {
+          "package_name": "com.example.gestor_calcados_new"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDgGjxyc9ZwMn_n8in5PdWLIMmUOUnb22A"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

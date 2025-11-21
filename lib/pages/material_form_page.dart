@@ -1,19 +1,32 @@
-// lib/screens/material_form_page.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../services/material_repository.dart';
-import '../models/material_item.dart';
+// --- NOVOS IMPORTS DO FIREBASE ---
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:gestor_calcados_new/models/app_user_model.dart';
+import 'package:gestor_calcados_new/models/material_model.dart';
+// ---------------------------------
+
+// --- IMPORTS ANTIGOS REMOVIDOS ---
+// import '../services/material_repository.dart'; // Removido (usamos Firestore)
+// import '../models/material_item.dart'; // Removido (usamos material_model.dart)
+// ---------------------------------
 
 class MaterialFormPage extends StatefulWidget {
-  final MaterialItem? material;
-  const MaterialFormPage({super.key, this.material});
+  // --- MUDANÇA: Recebe o novo modelo e o usuário ---
+  final MaterialModel? material;
+  final AppUserModel user;
+
+  const MaterialFormPage({super.key, this.material, required this.user});
+  // --- FIM DA MUDANÇA ---
 
   @override
   State<MaterialFormPage> createState() => _MaterialFormPageState();
 }
 
 class _MaterialFormPageState extends State<MaterialFormPage> {
-  late MaterialRepository _repository;
+  // --- MUDANÇA: Remove o repositório do Hive ---
+  // late MaterialRepository _repository;
+  // --- FIM DA MUDANÇA ---
   final _formKey = GlobalKey<FormState>();
 
   late TextEditingController _nameController;
@@ -27,7 +40,7 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
   final List<String> _colorsList = [];
   bool _isEditing = false;
   bool _isLoading = false;
-  bool _isPageReady = false;
+// Não precisamos mais carregar o Hive
 
   @override
   void initState() {
@@ -36,8 +49,10 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
   }
 
   Future<void> _initializeForm() async {
-    _repository = MaterialRepository();
-    await _repository.init();
+    // --- MUDANÇA: Remove a inicialização do Hive ---
+    // _repository = MaterialRepository();
+    // await _repository.init();
+    // --- FIM DA MUDANÇA ---
 
     _isEditing = widget.material != null;
 
@@ -54,29 +69,20 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
     _nameFocusNode = FocusNode();
 
     if (_isEditing) {
-      // carrega as cores existentes para edição
-      final existing = widget.material!.colors;
-      if (existing != null) _colorsList.addAll(existing);
+      _colorsList.addAll(widget.material!.colors);
     }
 
-    if (mounted) {
-      setState(() {
-        _isPageReady = true;
-      });
-    }
+    // Não precisamos mais do _isPageReady, mas mantemos a lógica
   }
 
   @override
   void dispose() {
-    // só dispose se os controllers foram inicializados
-    if (_isPageReady) {
-      _nameController.dispose();
-      _supplierController.dispose();
-      _priceController.dispose();
-      _heightController.dispose();
-      _colorInputController.dispose();
-      _nameFocusNode.dispose();
-    }
+    _nameController.dispose();
+    _supplierController.dispose();
+    _priceController.dispose();
+    _heightController.dispose();
+    _colorInputController.dispose();
+    _nameFocusNode.dispose();
     super.dispose();
   }
 
@@ -115,11 +121,10 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
     _nameFocusNode.requestFocus();
   }
 
+  // --- MUDANÇA: Função _saveMaterial() reescrita para o Firestore ---
   Future<void> _saveMaterial() async {
     if (!_formKey.currentState!.validate()) return;
 
-    // No fluxo atual eu mantenho a exigência de pelo menos 1 cor.
-    // Se preferir permitir 0 cores, remova esse bloco.
     if (_colorsList.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -139,19 +144,31 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
           double.tryParse(_priceController.text.replaceAll(',', '.')) ?? 0.0;
       final height =
           double.tryParse(_heightController.text.replaceAll(',', '.')) ?? 1.4;
+      final teamId = widget.user.teamId;
+
+      // ATENÇÃO AQUI: O nome da coleção é 'materials'
+      // Verifique se é o mesmo nome que você usou para criar o índice de leitura
+      final collectionRef = FirebaseFirestore.instance.collection('materials');
 
       if (_isEditing) {
-        // EDIÇÃO: atualiza o objeto existente
+        // --- MODO EDIÇÃO ---
         final material = widget.material!;
-        // name é readOnly em edição (mantido)
-        material.supplier = supplier;
-        material.price = price;
-        material.height = height;
 
-        // Atualiza as cores com a lista atual de chips
-        material.colors = List<String>.from(_colorsList);
+        // Novo MaterialModel com os dados atualizados
+        final updatedMaterial = MaterialModel(
+          id: material.id, // ID original do documento
+          teamId: material.teamId, // teamId original
+          name: name,
+          supplier: supplier,
+          price: price,
+          height: height,
+          colors: _colorsList,
+          createdAt: material.createdAt, // Mantém data de criação
+        );
 
-        await _repository.saveMaterial(material);
+        await collectionRef
+            .doc(updatedMaterial.id)
+            .update(updatedMaterial.toFirestore());
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -163,11 +180,18 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
           Navigator.pop(context, true);
         }
       } else {
-        // CRIAÇÃO: valida duplicidade e salva novo material
-        final newId = name.toLowerCase().trim();
-        final existingMaterial = _repository.getById(newId);
+        // --- MODO CRIAÇÃO ---
 
-        if (existingMaterial != null) {
+        // 1. Verifica se já existe um material com este NOME e TEAMID
+        // !! ISTO VAI EXIGIR UM NOVO ÍNDICE COMPOSTO NO FIREBASE !!
+        // Coleção: 'materials', Campo 1: 'teamId' (Crescente), Campo 2: 'name' (Crescente)
+        final query = await collectionRef
+            .where('teamId', isEqualTo: teamId)
+            .where('name', isEqualTo: name)
+            .limit(1)
+            .get();
+
+        if (query.docs.isNotEmpty) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -177,15 +201,20 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
             );
           }
         } else {
-          final newMaterial = MaterialItem(
+          // 2. Cria o novo material
+          final newDocRef = collectionRef.doc();
+          final newMaterial = MaterialModel(
+            id: newDocRef.id,
+            teamId: teamId,
             name: name,
             supplier: supplier,
             price: price,
             height: height,
-            colors: List<String>.from(_colorsList),
+            colors: _colorsList,
+            createdAt: Timestamp.now(),
           );
 
-          await _repository.saveMaterial(newMaterial);
+          await newDocRef.set(newMaterial.toFirestore());
 
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -194,12 +223,14 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
                 backgroundColor: Colors.green,
               ),
             );
-            _resetForm();
+            _resetForm(); // Limpa o formulário para o próximo
           }
         }
       }
     } catch (e) {
       if (mounted) {
+        // Este é o 'catch' que você adicionou!
+        print('DEBUG: ERRO CRÍTICO AO SALVAR: $e'); // Para o console
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Erro ao salvar: $e'),
@@ -211,6 +242,7 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
       if (mounted) setState(() => _isLoading = false);
     }
   }
+  // --- FIM DA MUDANÇA ---
 
   @override
   Widget build(BuildContext context) {
@@ -218,191 +250,188 @@ class _MaterialFormPageState extends State<MaterialFormPage> {
       appBar: AppBar(
         title: Text(_isEditing ? 'Editar Material' : 'Cadastrar Material'),
       ),
-      body: !_isPageReady
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16.0),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    TextFormField(
-                      controller: _nameController,
-                      focusNode: _nameFocusNode,
+      // --- MUDANÇA: Removido o _isPageReady (não é mais necessário) ---
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextFormField(
+                controller: _nameController,
+                focusNode: _nameFocusNode,
+                decoration: const InputDecoration(
+                  labelText: 'Nome do Material (Ex: Camurça)',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.label_important_outline),
+                ),
+                // --- MUDANÇA: Agora o nome PODE ser editado ---
+                // readOnly: _isEditing, // Removido
+                // --- FIM DA MUDANÇA ---
+                textCapitalization: TextCapitalization.words,
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'O nome é obrigatório';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _supplierController,
+                decoration: const InputDecoration(
+                  labelText: 'Fornecedor (Opcional)',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.store_mall_directory_outlined),
+                ),
+                textCapitalization: TextCapitalization.words,
+              ),
+              const SizedBox(height: 16),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _priceController,
                       decoration: const InputDecoration(
-                        labelText: 'Nome do Material (Ex: Camurça)',
+                        labelText: 'Preço (R\$)',
                         border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.label_important_outline),
+                        prefixIcon: Icon(Icons.attach_money_outlined),
                       ),
-                      readOnly: _isEditing,
-                      textCapitalization: TextCapitalization.words,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(RegExp(r'[\d.,]')),
+                      ],
                       validator: (value) {
-                        if (value == null || value.trim().isEmpty) {
-                          return 'O nome é obrigatório';
+                        if (value == null || value.isEmpty) {
+                          return null; // Opcional
+                        }
+                        final price =
+                            double.tryParse(value.replaceAll(',', '.')) ?? -1;
+                        if (price < 0) {
+                          return 'Preço inválido';
                         }
                         return null;
                       },
                     ),
-                    const SizedBox(height: 16),
-                    TextFormField(
-                      controller: _supplierController,
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _heightController,
                       decoration: const InputDecoration(
-                        labelText: 'Fornecedor (Opcional)',
+                        labelText: 'Altura (m)',
                         border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.store_mall_directory_outlined),
+                        prefixIcon: Icon(Icons.straighten_outlined),
+                      ),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(RegExp(r'[\d.,]')),
+                      ],
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Obrigatório';
+                        }
+                        final height =
+                            double.tryParse(value.replaceAll(',', '.')) ?? 0;
+                        if (height <= 0) {
+                          return 'Inválido';
+                        }
+                        return null;
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Cores Disponíveis',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _colorInputController,
+                      decoration: const InputDecoration(
+                        labelText: 'Digite uma cor (Ex: Preto)',
+                        border: OutlineInputBorder(),
                       ),
                       textCapitalization: TextCapitalization.words,
+                      onSubmitted: (_) => _addNewColor(),
                     ),
-                    const SizedBox(height: 16),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: _priceController,
-                            decoration: const InputDecoration(
-                              labelText: 'Preço (R\$)',
-                              border: OutlineInputBorder(),
-                              prefixIcon: Icon(Icons.attach_money_outlined),
-                            ),
-                            keyboardType: const TextInputType.numberWithOptions(
-                                decimal: true),
-                            inputFormatters: [
-                              FilteringTextInputFormatter.allow(
-                                  RegExp(r'[\d.,]')),
-                            ],
-                            validator: (value) {
-                              if (value == null || value.isEmpty) {
-                                return null; // Opcional
-                              }
-                              final price =
-                                  double.tryParse(value.replaceAll(',', '.')) ??
-                                      -1;
-                              if (price < 0) {
-                                return 'Preço inválido';
-                              }
-                              return null;
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: TextFormField(
-                            controller: _heightController,
-                            decoration: const InputDecoration(
-                              labelText: 'Altura (m)',
-                              border: OutlineInputBorder(),
-                              prefixIcon: Icon(Icons.straighten_outlined),
-                            ),
-                            keyboardType: const TextInputType.numberWithOptions(
-                                decimal: true),
-                            inputFormatters: [
-                              FilteringTextInputFormatter.allow(
-                                  RegExp(r'[\d.,]')),
-                            ],
-                            validator: (value) {
-                              if (value == null || value.isEmpty) {
-                                return 'Obrigatório';
-                              }
-                              final height =
-                                  double.tryParse(value.replaceAll(',', '.')) ??
-                                      0;
-                              if (height <= 0) {
-                                return 'Inválido';
-                              }
-                              return null;
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      'Cores Disponíveis',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _colorInputController,
-                            decoration: const InputDecoration(
-                              labelText: 'Digite uma cor (Ex: Preto)',
-                              border: OutlineInputBorder(),
-                            ),
-                            textCapitalization: TextCapitalization.words,
-                            onSubmitted: (_) => _addNewColor(),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          icon: const Icon(Icons.add_circle),
-                          iconSize: 30,
-                          color: Theme.of(context).colorScheme.primary,
-                          onPressed: _addNewColor,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: _colorsList.isEmpty
-                          ? const Text(
-                              'Nenhuma cor adicionada.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: Colors.grey),
-                            )
-                          : Wrap(
-                              spacing: 8.0,
-                              runSpacing: 4.0,
-                              children: _colorsList.map((color) {
-                                return Chip(
-                                  label: Text(color),
-                                  backgroundColor: Colors.grey.shade200,
-                                  onDeleted: () {
-                                    setState(() {
-                                      _colorsList.remove(color);
-                                    });
-                                  },
-                                );
-                              }).toList(),
-                            ),
-                    ),
-                    const SizedBox(height: 32),
-                    ElevatedButton.icon(
-                      icon: _isLoading
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                color: Colors.white,
-                                strokeWidth: 2,
-                              ),
-                            )
-                          : const Icon(Icons.save),
-                      label: Text(_isLoading
-                          ? 'Salvando...'
-                          : (_isEditing ? 'Atualizar' : 'Salvar')),
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        textStyle: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      onPressed: _isLoading ? null : _saveMaterial,
-                    ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    icon: const Icon(Icons.add_circle),
+                    iconSize: 30,
+                    color: Theme.of(context).colorScheme.primary,
+                    onPressed: _addNewColor,
+                  ),
+                ],
               ),
-            ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade400),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: _colorsList.isEmpty
+                    ? const Text(
+                        'Nenhuma cor adicionada.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey),
+                      )
+                    : Wrap(
+                        spacing: 8.0,
+                        runSpacing: 4.0,
+                        children: _colorsList.map((color) {
+                          return Chip(
+                            label: Text(color),
+                            backgroundColor: Colors.grey.shade200,
+                            onDeleted: () {
+                              setState(() {
+                                _colorsList.remove(color);
+                              });
+                            },
+                          );
+                        }).toList(),
+                      ),
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton.icon(
+                icon: _isLoading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(Icons.save),
+                label: Text(_isLoading
+                    ? 'Salvando...'
+                    : (_isEditing ? 'Atualizar' : 'Salvar')),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  textStyle: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                onPressed: _isLoading ? null : _saveMaterial,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

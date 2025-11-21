@@ -1,72 +1,48 @@
 // lib/services/ticket_pdf_service.dart
-import 'package:gestor_calcados_new/data/product_repository.dart';
-import 'package:gestor_calcados_new/models/product.dart';
-import 'package:gestor_calcados_new/models/ticket.dart';
-import 'package:gestor_calcados_new/services/material_repository.dart';
 import 'package:intl/intl.dart';
 // As duas importações de PDF
-import 'package:pdf/pdf.dart'; // <--- Contém PdfTextOverflow
-import 'package:pdf/widgets.dart' as pw; // <--- Contém pw.Text
+import 'package:pdf/pdf.dart'; // Contém PdfTextOverflow
+import 'package:pdf/widgets.dart' as pw; // Contém pw.Text
 import 'package:printing/printing.dart';
 import 'package:barcode/barcode.dart';
 import 'dart:convert';
 
-// --- CORREÇÃO: Classe auxiliar para substituir os "Records" do Dart 3 ---
-/// Classe auxiliar privada para agrupar os repositórios.
-class _Repositories {
-  final Map<String, Product> productMap;
-  final MaterialRepository materialRepo;
-  _Repositories(this.productMap, this.materialRepo);
-}
-// --- FIM DA CORREÇÃO ---
+// --- MUDANÇA: Imports dos novos modelos do Firebase ---
+import 'package:gestor_calcados_new/models/product_model.dart';
+import 'package:gestor_calcados_new/models/ticket_model.dart';
+// --- FIM DA MUDANÇA ---
+
+// As classes/funções _Repositories e _getRepositories foram REMOVIDAS
+// pois eram específicas do Hive.
 
 class TicketPdfService {
   // Helper para formatar metros
   static String _formatMeters(double v) =>
       v >= 1 ? '${v.toStringAsFixed(2)} m' : '${v.toStringAsFixed(3)} m';
 
-  // Helper para buscar os repositórios
-  // --- CORREÇÃO: Mudança do tipo de retorno (de Record para a classe) ---
-  static Future<_Repositories> _getRepositories() async {
-    final materialRepo = MaterialRepository();
-    await materialRepo.init();
-
-    final productRepo = ProductRepository();
-    try {
-      await productRepo.init();
-    } catch (e) {
-      // print('Repo de produto já iniciado ou não tem init: $e');
-    }
-    final allProducts = productRepo.getAll();
-    final productMap = {for (var p in allProducts) p.name: p};
-
-    // Retorna a instância da classe auxiliar
-    return _Repositories(productMap, materialRepo);
-  }
-
   /// Gera um PDF com múltiplas fichas, 2 por página.
-  static Future<void> generateBatchPdf(List<Ticket> tickets) async {
+  // --- MUDANÇA: Recebe a nova lista de TicketModel ---
+  static Future<void> generateBatchPdf(List<TicketModel> tickets) async {
+    // --- FIM DA MUDANÇA ---
     final pdf = pw.Document();
     final df = DateFormat('dd/MM/yyyy HH:mm');
     final now = DateTime.now();
 
-    // --- CORREÇÃO: Ajuste na chamada da função e na extração dos dados ---
-    final repos = await _getRepositories();
-    final productMap = repos.productMap;
-    final materialRepo = repos.materialRepo;
-    // --- FIM DA CORREÇÃO ---
+    // Removemos a busca aos repositórios, pois não é mais necessária.
+    // O TicketModel já tem tudo que precisamos (inclusive o materialsUsed).
 
     for (int i = 0; i < tickets.length; i += 2) {
       final ticket1 = tickets[i];
-      final product1 = productMap[ticket1.modelo];
+      // O product1 não é realmente usado no _buildFichaWidget,
+      // exceto para uma verificação de 'null'. Podemos passar null.
+      final ProductModel? product1 = null;
 
-      final Ticket? ticket2 = (i + 1 < tickets.length) ? tickets[i + 1] : null;
-      final Product? product2 =
-          ticket2 != null ? productMap[ticket2.modelo] : null;
+      final TicketModel? ticket2 =
+          (i + 1 < tickets.length) ? tickets[i + 1] : null;
+      final ProductModel? product2 = null;
 
       pdf.addPage(
         pw.Page(
-          // Mantendo o pageFormat: PdfPageFormat.a4 para máxima compatibilidade
           pageFormat: PdfPageFormat.a4,
           margin: const pw.EdgeInsets.all(18),
           build: (pw.Context context) {
@@ -79,7 +55,7 @@ class TicketPdfService {
                     ticket1,
                     product1,
                     df.format(now),
-                    materialRepo,
+                    // materialRepo não é mais necessário
                   ),
                 ),
                 pw.Divider(
@@ -94,7 +70,7 @@ class TicketPdfService {
                           ticket2,
                           product2,
                           df.format(now),
-                          materialRepo,
+                          // materialRepo não é mais necessário
                         )
                       : pw.Center(child: pw.Text('')),
                 ),
@@ -111,6 +87,7 @@ class TicketPdfService {
   }
 
   // --- HELPER para desenhar UM item de consumo ---
+  // (Esta função não muda, pois MaterialEstimate é o mesmo)
   static pw.Widget _buildConsumptionItem(MaterialEstimate e) {
     final piecesStr = e.pieceNames.join(', ');
 
@@ -149,25 +126,31 @@ class TicketPdfService {
   }
 
   /// Desenha o layout de UMA ÚNICA ficha
+  // --- MUDANÇA: Recebe TicketModel e remove materialRepo ---
   static pw.Widget _buildFichaWidget(
-    Ticket ticket,
-    Product? product,
+    TicketModel ticket,
+    ProductModel? product,
     String dataGeracao,
-    MaterialRepository materialRepo,
+    // MaterialRepository materialRepo, // REMOVIDO
   ) {
+    // --- FIM DA MUDANÇA ---
+
     // 1. Gerar QR Code
+    // --- MUDANÇA: Usa os campos do TicketModel ---
     final qrData = {
       'id': ticket.id,
-      'modelo': ticket.modelo,
-      'marca': ticket.marca,
-      'cor': ticket.cor,
+      'modelo': ticket.productName, // MUDOU
+      'marca': ticket.productReference, // MUDOU
+      'cor': ticket.productColor, // MUDOU
       'pairs': ticket.pairs
     };
+    // --- FIM DA MUDANÇA ---
+
     final qrJsonString = json.encode(qrData);
     final bc = Barcode.qrCode();
     final qrSvg = bc.toSvg(qrJsonString, width: 90, height: 90);
 
-    // 2. Obter estimativas
+    // 2. Obter estimativas (AGORA VEM DIRETO DO TICKETMODEL)
     final List<MaterialEstimate> estimates = ticket.materialsUsed;
 
     // 3. Construir o layout
@@ -216,12 +199,16 @@ class TicketPdfService {
             child: pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
-                pw.Text('MODELO: ${ticket.modelo}',
+                // --- MUDANÇA: Usa os campos do TicketModel ---
+                pw.Text('MODELO: ${ticket.productName}',
                     style: const pw.TextStyle(fontSize: 12)),
-                pw.Text('COR: ${ticket.cor.isEmpty ? "-" : ticket.cor}',
+                pw.Text(
+                    'COR: ${ticket.productColor.isEmpty ? "-" : ticket.productColor}',
                     style: const pw.TextStyle(fontSize: 12)),
-                pw.Text('MARCA: ${ticket.marca}',
+                pw.Text(
+                    'MARCA: ${ticket.productReference}', // MUDOU (era marca)
                     style: const pw.TextStyle(fontSize: 12)),
+                // --- FIM DA MUDANÇA ---
               ],
             ),
           ),
@@ -311,7 +298,7 @@ class TicketPdfService {
                 ? pw.Padding(
                     padding: const pw.EdgeInsets.all(4),
                     child: pw.Text(
-                        product == null && ticket.materialsUsed.isEmpty
+                        (product == null && ticket.materialsUsed.isEmpty)
                             ? '(Modelo não encontrado)'
                             : '(Sem consumo)',
                         style: const pw.TextStyle(
@@ -357,7 +344,7 @@ class TicketPdfService {
   }
 }
 
-// Extensão auxiliar
+// Extensão auxiliar (NÃO MUDOU)
 extension IterableExt<T> on Iterable<T> {
   T? firstWhereOrNull(bool Function(T) test) {
     for (final element in this) {

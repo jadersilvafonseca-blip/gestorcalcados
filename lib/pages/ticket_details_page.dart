@@ -1,31 +1,60 @@
-// lib/pages/ticket_details_page.dart (LIMPO E CORRIGIDO)
-
 import 'package:flutter/material.dart';
-import 'package:gestor_calcados_new/models/ticket.dart';
-import 'package:gestor_calcados_new/pages/create_ticket_page.dart';
 
-// --- IMPORTAÇÕES DE PDF REMOVIDAS ---
-// (Não são mais necessárias nesta página)
-// ------------------------------------
+// Modelos
+import 'package:gestor_calcados_new/models/ticket_model.dart';
 
-// Importações do modelo de produto que estavam faltando
-import 'package:gestor_calcados_new/models/product.dart';
-// (O repositório não é mais necessário aqui, pois não geramos PDF)
+// --- MUDANÇA: Importa o serviço de PDF ---
+import 'package:gestor_calcados_new/services/pdf_service.dart';
+// --- FIM DA MUDANÇA ---
 
 class TicketDetailsPage extends StatelessWidget {
-  final Ticket ticket;
+  final TicketModel ticket;
 
   const TicketDetailsPage({
     super.key,
     required this.ticket,
   });
 
-  // =========================================================
-  // LÓGICA DE GERAÇÃO DE PDF FOI TOTALMENTE REMOVIDA DESTE ARQUIVO
-  // (Agora ela vive apenas no TicketPdfService.dart)
-  // =========================================================
   String _formatMeters(double v) =>
       v >= 1 ? '${v.toStringAsFixed(2)} m' : '${v.toStringAsFixed(3)} m';
+
+  // ============================================================
+  // --- SEÇÃO CORRIGIDA ---
+  // ============================================================
+  Future<void> _generatePdf(BuildContext context) async {
+    // Mostra um snackbar simples de "gerando"
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Gerando PDF...')),
+    );
+
+    try {
+      // --- CORREÇÃO AQUI ---
+      // Chamamos a função que gera o PDF para UMA ÚNICA ficha,
+      // passando a 'ticket' que esta página já tem.
+      final result = await PdfService.generateAndShareTicket(ticket);
+
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).removeCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.message ?? 'PDF Gerado.'),
+          backgroundColor: result.ok ? Colors.green : Colors.blue,
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).removeCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Erro ao gerar PDF: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+  // ============================================================
+  // --- FIM DA CORREÇÃO ---
+  // ============================================================
 
   @override
   Widget build(BuildContext context) {
@@ -38,73 +67,47 @@ class TicketDetailsPage extends StatelessWidget {
           children: [
             _buildInfoCard(
               title: 'Modelo/Cor',
-              content: '${ticket.modelo} / ${ticket.cor}',
+              content: '${ticket.productName} / ${ticket.productColor}',
             ),
             _buildInfoCard(
-              title: 'Marca/Cliente',
-              content: '${ticket.marca} / ${ticket.cliente}',
+              title: 'Cliente/Pedido',
+              content:
+                  '${ticket.cliente.isNotEmpty ? ticket.cliente : '-'} / ${ticket.pedido.isNotEmpty ? ticket.pedido : '-'}',
             ),
             _buildInfoCard(
               title: 'Total de Pares',
               content: '${ticket.pairs} Pares',
             ),
             _buildInfoCard(
-              title: 'Nº do Pedido',
-              content: ticket.pedido.isEmpty ? '-' : ticket.pedido,
+              title: 'Status Atual',
+              content:
+                  '${ticket.currentSectorName.isNotEmpty ? ticket.currentSectorName : '-'}',
             ),
             if (ticket.observacao.isNotEmpty)
               _buildInfoCard(
                 title: 'Observações',
                 content: ticket.observacao,
               ),
-
             const SizedBox(height: 16),
             Text('GRADE DE PRODUÇÃO',
                 style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
             _buildGradeTable(ticket.grade),
-
-            // MOSTRA O CONSUMO (lendo da ficha)
             if (ticket.materialsUsed.isNotEmpty) ...[
               const SizedBox(height: 16),
               Text('CONSUMO DE MATERIAIS',
                   style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
               _buildConsumptionList(ticket.materialsUsed),
             ],
-
             const SizedBox(height: 24),
-
-            // --- INÍCIO DA MUDANÇA (BOTÕES) ---
-            // O Row foi removido
-            SizedBox(
-              width: double.infinity, // Ocupa a largura toda
-              height: 48,
-              child: OutlinedButton.icon(
-                onPressed: () async {
-                  // IMPLEMENTAÇÃO DE EDIÇÃO: Navega para a CreateTicketPage
-                  final bool? result = await Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) =>
-                          CreateTicketPage(ticketToEdit: ticket),
-                    ),
-                  );
-
-                  // Se a tela de edição retornar 'true', significa que foi salvo/atualizado
-                  if (result == true) {
-                    // É uma boa prática forçar a volta à TicketsPage após a edição
-                    if (Navigator.of(context).canPop()) {
-                      Navigator.of(context).pop(true);
-                    }
-                  }
-                },
-                icon: const Icon(Icons.edit),
-                label:
-                    const Text('Editar Ficha', style: TextStyle(fontSize: 16)),
-              ),
-            ),
-            // O botão de "Gerar PDF Novamente" foi REMOVIDO
-            // --- FIM DA MUDANÇA ---
           ],
         ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _generatePdf(context),
+        tooltip: 'Gerar PDF',
+        child: const Icon(Icons.picture_as_pdf),
       ),
     );
   }
@@ -119,24 +122,45 @@ class TicketDetailsPage extends StatelessWidget {
           Text(title,
               style:
                   const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          const SizedBox(height: 4),
           Text(content, style: const TextStyle(fontSize: 16)),
         ],
       ),
     );
   }
 
-  Widget _buildGradeTable(Map<String, int> grade) {
-    final sortedEntries = grade.entries.where((e) => e.value > 0).toList()
-      ..sort((a, b) => int.parse(a.key).compareTo(int.parse(b.key)));
+  Widget _buildGradeTable(Map<String, int>? grade) {
+    final safeGrade = grade ?? <String, int>{};
+    final visibleEntries =
+        safeGrade.entries.where((e) => (e.value) > 0).toList();
+
+    if (visibleEntries.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: Text('Nenhuma grade registrada.',
+            style: TextStyle(color: Colors.grey.shade700)),
+      );
+    }
+
+    visibleEntries.sort((a, b) {
+      final ak = a.key;
+      final bk = b.key;
+      final aNum = int.tryParse(ak);
+      final bNum = int.tryParse(bk);
+      if (aNum != null && bNum != null) return aNum.compareTo(bNum);
+      if (aNum != null) return -1;
+      if (bNum != null) return 1;
+      return ak.compareTo(bk);
+    });
 
     return Table(
       border: TableBorder.all(color: Colors.grey.shade400),
       children: [
         TableRow(
-          children: sortedEntries
+          children: visibleEntries
               .map((e) => TableCell(
                     child: Padding(
-                      padding: const EdgeInsets.all(4.0),
+                      padding: const EdgeInsets.all(6.0),
                       child: Center(
                           child: Text(e.key,
                               style: const TextStyle(
@@ -146,10 +170,10 @@ class TicketDetailsPage extends StatelessWidget {
               .toList(),
         ),
         TableRow(
-          children: sortedEntries
+          children: visibleEntries
               .map((e) => TableCell(
                     child: Padding(
-                      padding: const EdgeInsets.all(4.0),
+                      padding: const EdgeInsets.all(6.0),
                       child: Center(child: Text('${e.value}')),
                     ),
                   ))
@@ -159,8 +183,15 @@ class TicketDetailsPage extends StatelessWidget {
     );
   }
 
-  // Widget para mostrar a lista de consumo (lida da ficha)
   Widget _buildConsumptionList(List<MaterialEstimate> estimates) {
+    if (estimates.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: Text('Nenhum consumo registrado.',
+            style: TextStyle(color: Colors.grey.shade700)),
+      );
+    }
+
     return Container(
       decoration: BoxDecoration(
         border: Border.all(color: Colors.grey.shade400),
@@ -174,11 +205,15 @@ class TicketDetailsPage extends StatelessWidget {
             Divider(height: 1, color: Colors.grey.shade300),
         itemBuilder: (context, index) {
           final e = estimates[index];
-          final piecesStr = e.pieceNames.join(', ');
+          final piecesStr =
+              (e.pieceNames.isNotEmpty) ? e.pieceNames.join(', ') : '-';
+          final materialName = e.material;
+          final colorName = e.color;
+          final meters = e.meters;
 
           return ListTile(
             title: Text(
-              '${e.material} (${e.color})',
+              '$materialName ($colorName)',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             subtitle: Text(
@@ -186,7 +221,7 @@ class TicketDetailsPage extends StatelessWidget {
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             trailing: Text(
-              _formatMeters(e.meters),
+              _formatMeters(meters),
               style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
             ),
           );

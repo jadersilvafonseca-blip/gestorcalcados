@@ -1,18 +1,19 @@
-// lib/pages/product_form_page.dart
 import 'package:flutter/material.dart';
-import 'package:gestor_calcados_new/models/product.dart';
-import 'package:gestor_calcados_new/data/product_repository.dart';
-import 'package:gestor_calcados_new/services/hive_service.dart';
-import 'package:gestor_calcados_new/models/material_item.dart';
+// --- NOVOS IMPORTS DO FIREBASE ---
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:gestor_calcados_new/models/app_user_model.dart';
+import 'package:gestor_calcados_new/models/product_model.dart';
+
+// --- MUDANÇA: IMPORTA O NOVO MODELO DE MATERIAL (FIREBASE) ---
+import 'package:gestor_calcados_new/models/material_model.dart';
+// ---------------------------------
+
 import 'package:gestor_calcados_new/services/material_repository.dart';
 
-// ignore: unused_import
-import 'package:gestor_calcados_new/utils/date.dart';
-
 class ProductFormPage extends StatefulWidget {
-  final Product? product;
-
-  const ProductFormPage({super.key, this.product});
+  final ProductModel? product;
+  final AppUserModel user;
+  const ProductFormPage({super.key, this.product, required this.user});
 
   @override
   State<ProductFormPage> createState() => _ProductFormPageState();
@@ -20,54 +21,76 @@ class ProductFormPage extends StatefulWidget {
 
 class _ProductFormPageState extends State<ProductFormPage> {
   final _formKey = GlobalKey<FormState>();
-  // --- MUDANÇA: _idCtrl virou _refCtrl (para "Referência") ---
   final _refCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
   final _brandCtrl = TextEditingController();
   final _colorCtrl = TextEditingController();
 
+  // FocusNode para colocar foco automático após limpar
+  final FocusNode _refFocus = FocusNode();
+
   final List<Piece> _pieces = [];
 
-  final repo = ProductRepository();
   final _materialRepo = MaterialRepository();
 
-  // --- NOVO: Flag para modo de edição ---
+  // Cache de materiais (para substituir a leitura síncrona do Hive)
+  List<MaterialModel> _allMaterials = [];
+
   bool _isEditing = false;
+  bool _isLoading = false;
+  bool _isPreparing = true; // Novo estado de loading para o _prepare
 
   @override
   void initState() {
     super.initState();
-    _isEditing = widget.product != null; // Define o modo
+    _isEditing = widget.product != null;
     _prepare();
   }
 
+  @override
+  void dispose() {
+    _refCtrl.dispose();
+    _nameCtrl.dispose();
+    _brandCtrl.dispose();
+    _colorCtrl.dispose();
+    _refFocus.dispose();
+    super.dispose();
+  }
+
   Future<void> _prepare() async {
-    await HiveService.init();
-    await repo.init();
-    await _materialRepo.init();
+    try {
+      _allMaterials = await _materialRepo.getAll(widget.user.teamId);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Erro ao carregar materiais: $e'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
 
     if (_isEditing) {
-      // Usa a flag
       final p = widget.product!;
-      // --- MUDANÇA: Preenche os campos corretos ---
-      _refCtrl.text = p.reference; // <--- O campo de referência
+      _refCtrl.text = p.reference;
       _nameCtrl.text = p.name;
       _brandCtrl.text = p.brand;
       _colorCtrl.text = p.color;
       _pieces.addAll(p.pieces);
-      if (mounted) {
-        setState(() {});
-      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _isPreparing = false; // Termina o loading
+      });
     }
   }
 
-  // --- O _addPieceDialog() e o _selectMaterialDialog() estão CORRETOS ---
-  // (Nenhuma alteração aqui, estão perfeitos como você mandou)
   void _addPieceDialog() async {
     final nameCtrl = TextEditingController();
     final areaCtrl = TextEditingController();
-    MaterialItem? selectedMaterial;
+    MaterialModel? selectedMaterial;
     String? selectedColor;
+
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) {
@@ -102,7 +125,7 @@ class _ProductFormPageState extends State<ProductFormPage> {
                       ),
                       trailing: const Icon(Icons.arrow_drop_down),
                       onTap: () async {
-                        final MaterialItem? result =
+                        final MaterialModel? result =
                             await _selectMaterialDialog(context);
                         if (result != null) {
                           setStateInDialog(() {
@@ -174,15 +197,157 @@ class _ProductFormPageState extends State<ProductFormPage> {
     setState(() {
       _pieces.add(Piece(
         name: name,
-        material: selectedMaterial!.name,
+        material: selectedMaterial!.name, // Salva o NOME do material
         color: selectedColor!,
         areaPerPair: area,
       ));
     });
   }
 
-  Future<MaterialItem?> _selectMaterialDialog(BuildContext context) async {
-    final materials = _materialRepo.getAll();
+  Future<void> _editPieceDialog(int index) async {
+    final Piece pieceToEdit = _pieces[index];
+
+    final nameCtrl = TextEditingController(text: pieceToEdit.name);
+    final areaCtrl =
+        TextEditingController(text: pieceToEdit.areaPerPair.toString());
+
+    MaterialModel? selectedMaterial;
+    String? selectedColor;
+
+    try {
+      selectedMaterial = _allMaterials.firstWhere((m) =>
+          m.name.toLowerCase().trim() ==
+          pieceToEdit.material.toLowerCase().trim());
+
+      if (selectedMaterial.colors.contains(pieceToEdit.color)) {
+        selectedColor = pieceToEdit.color;
+      }
+    } catch (e) {
+      selectedMaterial = null;
+      selectedColor = null;
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setStateInDialog) {
+            return AlertDialog(
+              title: const Text('Editar peça'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: nameCtrl,
+                      decoration:
+                          const InputDecoration(labelText: 'Nome da peça'),
+                      textCapitalization: TextCapitalization.words,
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Material'),
+                      subtitle: Text(
+                        selectedMaterial?.name ?? 'Clique para selecionar',
+                        style: TextStyle(
+                          color: selectedMaterial != null
+                              ? Theme.of(context).colorScheme.primary
+                              : Colors.grey,
+                          fontWeight: selectedMaterial != null
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
+                      ),
+                      trailing: const Icon(Icons.arrow_drop_down),
+                      onTap: () async {
+                        final MaterialModel? result =
+                            await _selectMaterialDialog(context);
+                        if (result != null) {
+                          setStateInDialog(() {
+                            if (selectedMaterial?.id != result.id) {
+                              selectedColor = null;
+                            }
+                            selectedMaterial = result;
+                          });
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    if (selectedMaterial != null)
+                      DropdownButtonFormField<String>(
+                        value: selectedColor,
+                        hint: const Text('Selecione uma cor'),
+                        decoration: const InputDecoration(
+                          labelText: 'Cor',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: selectedMaterial!.colors
+                            .map((color) => DropdownMenuItem(
+                                  value: color,
+                                  child: Text(color),
+                                ))
+                            .toList(),
+                        onChanged: (value) {
+                          setStateInDialog(() {
+                            selectedColor = value;
+                          });
+                        },
+                        validator: (value) =>
+                            value == null ? 'Obrigatório' : null,
+                      ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: areaCtrl,
+                      decoration: const InputDecoration(
+                          labelText: 'Área por par (m²) - ex: 0.0198'),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Cancelar')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Salvar Alterações')),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (ok != true) return;
+
+    final name = nameCtrl.text.trim();
+    final area = double.tryParse(areaCtrl.text.replaceAll(',', '.')) ?? 0.0;
+
+    if (name.isEmpty ||
+        selectedMaterial == null ||
+        selectedColor == null ||
+        area <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Preencha nome, área, material e cor válidos.'),
+          backgroundColor: Colors.red));
+      return;
+    }
+
+    setState(() {
+      _pieces[index] = Piece(
+        name: name,
+        material: selectedMaterial!.name,
+        color: selectedColor!,
+        areaPerPair: area,
+      );
+    });
+  }
+
+  Future<MaterialModel?> _selectMaterialDialog(BuildContext context) async {
+    final materials = _allMaterials;
     if (materials.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('Nenhum material cadastrado. Vá ao menu para cadastrar.'),
@@ -190,7 +355,7 @@ class _ProductFormPageState extends State<ProductFormPage> {
       ));
       return null;
     }
-    return showDialog<MaterialItem>(
+    return showDialog<MaterialModel>(
       context: context,
       builder: (ctx) {
         return AlertDialog(
@@ -225,75 +390,109 @@ class _ProductFormPageState extends State<ProductFormPage> {
       },
     );
   }
-  // --- FIM DAS FUNÇÕES NÃO ALTERADAS ---
 
-  // --- FUNÇÃO _save() TOTALMENTE ATUALIZADA ---
+  // --- FUNÇÃO _save() (versão robusta de limpeza e foco) ---
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
-    // 1. Pega os valores dos campos
+    setState(() => _isLoading = true);
+
     final reference = _refCtrl.text.trim();
     final name = _nameCtrl.text.trim();
     final brand = _brandCtrl.text.trim();
     final color = _colorCtrl.text.trim();
+    final teamId = widget.user.teamId;
 
-    double heightToSave = 1.4;
-    Product productToSave; // Declara o produto
+    try {
+      ProductModel productToSave;
+      final collectionRef = FirebaseFirestore.instance.collection('products');
 
-    if (_isEditing) {
-      // --- MODO EDIÇÃO ---
-      // Apenas atualiza os campos. O ID (ref+cor) não pode mudar.
-      heightToSave = widget.product!.materialHeightMeters;
-      productToSave = Product(
-        reference: reference, // 'reference' e 'color' são dos campos (readOnly)
-        name: name,
-        brand: brand,
-        color: color,
-        pieces: List<Piece>.from(_pieces),
-        materialHeightMeters: heightToSave,
-      );
-      // O ID gerado no construtor será o mesmo, pois 'reference' e 'color'
-      // não mudaram, permitindo ao Hive sobrescrever (atualizar) o item.
-    } else {
-      // --- MODO CRIAÇÃO ---
+      if (_isEditing) {
+        // Modo edição: atualiza e fecha a página retornando o produto
+        productToSave = ProductModel(
+          id: widget.product!.id,
+          teamId: widget.product!.teamId,
+          reference: reference,
+          name: name,
+          brand: brand,
+          color: color,
+          pieces: _pieces,
+          createdAt: widget.product!.createdAt,
+        );
 
-      // 2. Gera o ID único (ref + cor)
-      final uniqueId =
-          '${reference.toLowerCase().trim()}-${color.toLowerCase().trim()}';
+        await collectionRef
+            .doc(productToSave.id)
+            .update(productToSave.toFirestore());
 
-      // 3. Verifica se esse ID (Ref+Cor) já existe
-      // (Requer que 'repo' tenha o método 'getById')
-      final existingProduct = repo.getById(uniqueId);
-
-      if (existingProduct != null) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content:
-              Text('Erro: Já existe um produto com esta Referência e Cor.'),
-          backgroundColor: Colors.red,
-        ));
-        return; // Para o salvamento
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Produto atualizado.')));
+        Navigator.pop(context, productToSave);
+      } else {
+        // Modo criação: verifica duplicidade, salva, limpa o formulário e permanece na tela
+        final query = await collectionRef
+            .where('teamId', isEqualTo: teamId)
+            .where('reference', isEqualTo: reference)
+            .where('color', isEqualTo: color)
+            .limit(1)
+            .get();
+
+        if (query.docs.isNotEmpty) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content:
+                Text('Erro: Já existe um produto com esta Referência e Cor.'),
+            backgroundColor: Colors.red,
+          ));
+          setState(() => _isLoading = false);
+          return;
+        }
+
+        final newDocRef = collectionRef.doc();
+
+        productToSave = ProductModel(
+          id: newDocRef.id,
+          teamId: teamId,
+          reference: reference,
+          name: name,
+          brand: brand,
+          color: color,
+          pieces: _pieces,
+          createdAt: Timestamp.now(),
+        );
+
+        await newDocRef.set(productToSave.toFirestore());
+
+        if (!mounted) return;
+        // Mensagem e limpeza do formulário para criar outro
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Produto cadastrado com sucesso.')),
+        );
+
+        // LIMPEZA ROBUSTA: reseta controllers, lista e form
+        setState(() {
+          _refCtrl.clear();
+          _nameCtrl.clear();
+          _brandCtrl.clear();
+          _colorCtrl.clear();
+          _pieces.clear();
+          _formKey.currentState?.reset();
+        });
+
+        // Pequena espera para garantir que o rebuild já ocorreu antes de requisitar foco.
+        await Future.delayed(const Duration(milliseconds: 120));
+        if (!mounted) return;
+        FocusScope.of(context).requestFocus(_refFocus);
       }
-
-      // 4. Se não existe, cria o novo produto
-      productToSave = Product(
-        reference: reference,
-        name: name,
-        brand: brand,
-        color: color,
-        pieces: List<Piece>.from(_pieces),
-        materialHeightMeters: heightToSave, // Usa o padrão 1.4
-      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Erro ao salvar no Firestore: $e'),
+        backgroundColor: Colors.red,
+      ));
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
-
-    // 5. Salva (funciona para criar ou atualizar)
-    // O 'repo.save' deve usar o 'productToSave.id' como chave
-    await repo.save(productToSave);
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Produto salvo.')));
-    Navigator.pop(context, productToSave); // Retorna o produto salvo
   }
   // --- FIM DA FUNÇÃO _save() ---
 
@@ -306,103 +505,153 @@ class _ProductFormPageState extends State<ProductFormPage> {
           IconButton(onPressed: _addPieceDialog, icon: const Icon(Icons.add)),
         ],
       ),
-      body: SafeArea(
-        bottom: true,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              children: [
-                // --- CAMPO REFERÊNCIA ATUALIZADO ---
-                TextFormField(
-                    controller: _refCtrl, // <-- MUDOU AQUI
-                    // Bloqueia se estiver editando (para não mudar a chave)
-                    readOnly: _isEditing,
-                    decoration: InputDecoration(
-                        labelText: 'Referência (Modelo)',
-                        // Mostra aviso se estiver editando
-                        helperText: _isEditing
-                            ? 'Não pode ser alterado na edição'
-                            : null),
-                    validator: (v) =>
-                        (v ?? '').trim().isEmpty ? 'Obrigatório' : null),
-                // --- FIM DA MUDANÇA ---
+      body: _isPreparing
+          ? const Center(child: CircularProgressIndicator())
+          : SafeArea(
+              bottom: true,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    children: [
+                      TextFormField(
+                          controller: _refCtrl,
+                          focusNode: _refFocus,
+                          readOnly: _isEditing,
+                          decoration: InputDecoration(
+                              labelText: 'Referência (Modelo)',
+                              helperText: _isEditing
+                                  ? 'Não pode ser alterado na edição'
+                                  : null),
+                          validator: (v) =>
+                              (v ?? '').trim().isEmpty ? 'Obrigatório' : null),
+                      TextFormField(
+                          controller: _nameCtrl,
+                          decoration: const InputDecoration(
+                              labelText: 'Nome do produto'),
+                          validator: (v) =>
+                              (v ?? '').trim().isEmpty ? 'Obrigatório' : null),
+                      TextFormField(
+                          controller: _brandCtrl,
+                          decoration:
+                              const InputDecoration(labelText: 'Marca')),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                          controller: _colorCtrl,
+                          readOnly: _isEditing,
+                          decoration: InputDecoration(
+                              labelText: 'Cor do Produto (Ex: Preto)',
+                              helperText: _isEditing
+                                  ? 'Não pode ser alterado na edição'
+                                  : null),
+                          textCapitalization: TextCapitalization.words,
+                          validator: (v) => (v ?? '').trim().isEmpty
+                              ? 'Cor é obrigatória'
+                              : null),
+                      const SizedBox(height: 12),
+                      Expanded(
+                        child: _pieces.isEmpty
+                            ? const Center(
+                                child: Text(
+                                    'Nenhuma peça adicionada. Use o + no topo.'))
+                            : ListView.builder(
+                                itemCount: _pieces.length,
+                                itemBuilder: (ctx, i) {
+                                  final p = _pieces[i];
+                                  MaterialModel? material;
+                                  try {
+                                    material = _allMaterials.firstWhere((m) =>
+                                        m.name.toLowerCase().trim() ==
+                                        p.material.toLowerCase().trim());
+                                  } catch (e) {
+                                    material = null;
+                                  }
+                                  final height = material?.height ?? 1.4;
+                                  final pairsPerMeter = (p.areaPerPair > 0)
+                                      ? (height / p.areaPerPair)
+                                          .toStringAsFixed(1)
+                                      : '0';
+                                  final subtitleText =
+                                      'Área: ${p.areaPerPair} m²  |  Pares/metro: ~$pairsPerMeter (com ${height}m)';
 
-                TextFormField(
-                    controller: _nameCtrl,
-                    decoration:
-                        const InputDecoration(labelText: 'Nome do produto'),
-                    validator: (v) =>
-                        (v ?? '').trim().isEmpty ? 'Obrigatório' : null),
-                TextFormField(
-                    controller: _brandCtrl,
-                    decoration: const InputDecoration(labelText: 'Marca')),
-
-                const SizedBox(height: 12),
-
-                // --- CAMPO COR ATUALIZADO ---
-                TextFormField(
-                    controller: _colorCtrl,
-                    // Bloqueia se estiver editando (para não mudar a chave)
-                    readOnly: _isEditing,
-                    decoration: InputDecoration(
-                        labelText: 'Cor do Produto (Ex: Preto)',
-                        // Mostra aviso se estiver editando
-                        helperText: _isEditing
-                            ? 'Não pode ser alterado na edição'
-                            : null),
-                    textCapitalization: TextCapitalization.words,
-                    validator: (v) =>
-                        (v ?? '').trim().isEmpty ? 'Cor é obrigatória' : null),
-                // --- FIM DA MUDANÇA ---
-
-                const SizedBox(height: 12),
-
-                // --- LISTVIEW DE PEÇAS (Sem alteração) ---
-                Expanded(
-                  child: _pieces.isEmpty
-                      ? const Center(
-                          child:
-                              Text('Nenhuma peça adicionada. Use o + no topo.'))
-                      : ListView.builder(
-                          itemCount: _pieces.length,
-                          itemBuilder: (ctx, i) {
-                            final p = _pieces[i];
-                            final material = _materialRepo
-                                .getById(p.material.toLowerCase().trim());
-                            final height = material?.height ?? 1.4;
-                            final pairsPerMeter = (p.areaPerPair > 0)
-                                ? (height / p.areaPerPair).toStringAsFixed(1)
-                                : '0';
-                            final subtitleText =
-                                'Área: ${p.areaPerPair} m²  |  Pares/metro: ~$pairsPerMeter (com ${height}m)';
-
-                            return ListTile(
-                              isThreeLine: true,
-                              title: Text(
-                                  '${p.name} — ${p.material} (${p.color.isNotEmpty ? p.color : 'N/A'})'),
-                              subtitle: Text(subtitleText),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.delete),
-                                onPressed: () =>
-                                    setState(() => _pieces.removeAt(i)),
+                                  return ListTile(
+                                    isThreeLine: true,
+                                    title: Text(
+                                        '${p.name} — ${p.material} (${p.color.isNotEmpty ? p.color : 'N/A'})'),
+                                    subtitle: Text(subtitleText),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          icon: Icon(Icons.edit,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .primary),
+                                          onPressed: () {
+                                            _editPieceDialog(i);
+                                          },
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.delete,
+                                              color: Colors.red),
+                                          onPressed: () {
+                                            showDialog(
+                                              context: context,
+                                              builder: (ctx) => AlertDialog(
+                                                title: const Text(
+                                                    'Confirmar Exclusão'),
+                                                content: Text(
+                                                    'Tem certeza que quer remover a peça "${p.name}"?'),
+                                                actions: [
+                                                  TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(ctx),
+                                                    child:
+                                                        const Text('Cancelar'),
+                                                  ),
+                                                  FilledButton(
+                                                    onPressed: () {
+                                                      Navigator.pop(ctx);
+                                                      setState(() =>
+                                                          _pieces.removeAt(i));
+                                                    },
+                                                    child:
+                                                        const Text('Excluir'),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
                               ),
-                            );
-                          },
+                      ),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.tonal(
+                          onPressed: _isLoading ? null : _save,
+                          child: _isLoading
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : Text(_isEditing
+                                  ? 'Atualizar produto'
+                                  : 'Salvar produto'),
                         ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
                 ),
-
-                FilledButton.tonal(
-                  onPressed: _save,
-                  child: const Text('Salvar produto'),
-                ),
-                const SizedBox(height: 8),
-              ],
+              ),
             ),
-          ),
-        ),
-      ),
     );
   }
 }

@@ -1,14 +1,21 @@
-// lib/pages/create_ticket_page.dart
 import 'package:flutter/material.dart';
-import 'package:gestor_calcados_new/models/product.dart';
-import 'package:gestor_calcados_new/data/product_repository.dart';
-import 'package:gestor_calcados_new/services/hive_service.dart';
-import 'package:gestor_calcados_new/models/ticket.dart';
+// --- NOVOS IMPORTS DO FIREBASE ---
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:gestor_calcados_new/models/app_user_model.dart';
+import 'package:gestor_calcados_new/models/product_model.dart'; // O nosso "molde" de Produto
+import 'package:gestor_calcados_new/models/ticket_model.dart'; // O nosso "molde" de Ficha
+
+// --- MUDANÇA: IMPORTA O MODELO DE MATERIAL DO FIREBASE ---
+import 'package:gestor_calcados_new/models/material_model.dart';
+// import 'package:gestor_calcados_new/models/material_item.dart'; // REMOVIDO
+// ---------------------------------
+
 import 'package:gestor_calcados_new/services/material_repository.dart';
 
 class CreateTicketPage extends StatefulWidget {
-  final Ticket? ticketToEdit;
-  const CreateTicketPage({super.key, this.ticketToEdit});
+  final AppUserModel user;
+  final dynamic ticketToEdit;
+  const CreateTicketPage({super.key, required this.user, this.ticketToEdit});
 
   @override
   State<CreateTicketPage> createState() => _CreateTicketPageState();
@@ -19,62 +26,75 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
   final _pedidoCtrl = TextEditingController();
   final _obsCtrl = TextEditingController();
 
-  final repo = ProductRepository();
+  List<ProductModel> _products = [];
+  ProductModel? _selected;
+  bool _isLoading = true;
+  late bool _isEditing;
+
   final _materialRepo = MaterialRepository();
-  List<Product> _products = [];
-  Product? _selected;
-  bool _loading = true;
+
+  // --- MUDANÇA: Cache de materiais (para substituir a leitura síncrona do Hive) ---
+  List<MaterialModel> _allMaterials = [];
+  // --- FIM DA MUDANÇA ---
 
   final Map<String, TextEditingController> _gradeCtrls = {
     for (var i = 34; i <= 43; i++) '$i': TextEditingController()
   };
 
-  bool get _isEditing => widget.ticketToEdit != null;
-
   @override
   void initState() {
     super.initState();
-    _loadProducts();
+    _isEditing = widget.ticketToEdit != null;
+    _loadPrerequisites();
   }
 
-  Future<void> _loadProducts() async {
-    await HiveService.init();
-    await repo.init();
-    await _materialRepo.init();
+  // --- MUDANÇA: Carrega PRODUTOS (Firestore) e MATERIAIS (Firestore) ---
+  Future<void> _loadPrerequisites() async {
+    try {
+      // 1. Carrega o repositório de materiais (do Firestore, para o cache)
+      // await _materialRepo.init(); // REMOVIDO
+      _allMaterials = await _materialRepo.getAll(widget.user.teamId);
 
-    final list = repo.getAll();
+      // 2. Carrega os produtos (do Firestore)
+      // !! EXIGE ÍNDICE COMPOSTO: 'products' -> teamId (Crescente), name (Crescente) !!
+      final query = await FirebaseFirestore.instance
+          .collection('products')
+          .where('teamId', isEqualTo: widget.user.teamId)
+          .orderBy('name')
+          .get();
 
-    Product? initialProduct;
-    if (widget.ticketToEdit != null) {
-      initialProduct = list.firstWhereOrNull(
-        (p) =>
-            p.name == widget.ticketToEdit!.modelo &&
-            p.color == widget.ticketToEdit!.cor,
-      );
+      final list =
+          query.docs.map((doc) => ProductModel.fromFirestore(doc)).toList();
+
+      if (mounted) {
+        setState(() {
+          _products = list;
+          _selected = (list.isNotEmpty ? list.first : null);
+          _isLoading = false;
+        });
+        if (widget.ticketToEdit != null) {
+          _populateFromTicket(widget.ticketToEdit);
+        }
+      } else {
+        _products = list;
+        _selected = (list.isNotEmpty ? list.first : null);
+        _isLoading = false;
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao carregar pré-requisitos: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        setState(() => _isLoading = false);
+      } else {
+        _isLoading = false;
+      }
     }
-
-    setState(() {
-      _products = list;
-      _selected = initialProduct ?? (list.isNotEmpty ? list.first : null);
-      _loading = false;
-
-      if (_isEditing) {
-        _fillFields(widget.ticketToEdit!);
-      }
-    });
   }
-
-  void _fillFields(Ticket t) {
-    _clienteCtrl.text = t.cliente;
-    _pedidoCtrl.text = t.pedido;
-    _obsCtrl.text = t.observacao;
-
-    t.grade.forEach((key, value) {
-      if (_gradeCtrls.containsKey(key)) {
-        _gradeCtrls[key]!.text = (value == 0) ? '' : value.toString();
-      }
-    });
-  }
+  // --- FIM DA MUDANÇA ---
 
   @override
   void dispose() {
@@ -98,13 +118,17 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
   bool _validateInput() {
     if (_selected == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecione o modelo')),
+        const SnackBar(
+            content: Text('Selecione o modelo'),
+            backgroundColor: Colors.orange),
       );
       return false;
     }
     if (totalPares == 0) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Informe a grade de pares')),
+        const SnackBar(
+            content: Text('Informe a grade de pares'),
+            backgroundColor: Colors.orange),
       );
       return false;
     }
@@ -113,52 +137,26 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
 
   Future<String> _generateNextTicketId() async {
     final currentYear = DateTime.now().year.toString();
-    final allTickets = HiveService.getAllTickets();
-    final ticketsThisYear = allTickets.where((ticket) {
-      final parts = ticket.id.split('-');
-      if (parts.length != 2) return false;
-      final yearStr = parts[0];
-      return yearStr == currentYear;
-    }).toList();
-    int maxNumber = 0;
-    for (final ticket in ticketsThisYear) {
-      final parts = ticket.id.split('-');
-      final numberStr = parts[1];
-      final number = int.tryParse(numberStr);
-      if (number != null && number > maxNumber) {
-        maxNumber = number;
-      }
+
+    // !! EXIGE ÍNDICE COMPOSTO: 'tickets' -> teamId (Crescente), id (Decrescente) !!
+    final query = await FirebaseFirestore.instance
+        .collection('tickets')
+        .where('teamId', isEqualTo: widget.user.teamId)
+        .where('id', isGreaterThanOrEqualTo: '$currentYear-000')
+        .where('id', isLessThanOrEqualTo: '$currentYear-999')
+        .orderBy('id', descending: true)
+        .limit(1)
+        .get();
+
+    if (query.docs.isEmpty) {
+      return '$currentYear-001'; // Primeira ficha do ano
     }
-    final nextNumber = maxNumber + 1;
+
+    final lastId = query.docs.first.id;
+    final lastNumber = int.tryParse(lastId.split('-')[1]) ?? 0;
+    final nextNumber = lastNumber + 1;
     final nextNumberFormatted = nextNumber.toString().padLeft(3, '0');
     return '$currentYear-$nextNumberFormatted';
-  }
-
-  Future<void> _createOrUpdateTicket(String ticketId) async {
-    // 1. O cálculo é feito aqui
-    final List<MaterialEstimate> consumption =
-        _selected!.estimateMaterialsReadable(totalPares, _materialRepo);
-
-    final t = Ticket(
-      id: _isEditing ? widget.ticketToEdit!.id : ticketId,
-      cliente: _clienteCtrl.text,
-      pedido: _pedidoCtrl.text,
-      modelo: _selected!.name,
-      marca: _selected!.brand,
-      cor: _selected!.color,
-      pairs: totalPares,
-      grade: {
-        for (var n = 34; n <= 43; n++)
-          '$n': int.tryParse(_gradeCtrls['$n']!.text) ?? 0
-      },
-      observacao: _obsCtrl.text,
-
-      // --- CORREÇÃO AQUI ---
-      // Esta linha estava comentada. Agora está ATIVA.
-      materialsUsed: consumption,
-      // --- FIM DA CORREÇÃO ---
-    );
-    await HiveService.addTicket(t);
   }
 
   void _clearAllFields() {
@@ -171,29 +169,182 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
     setState(() {});
   }
 
+  // --- MUDANÇA: CÁLCULO DE MATERIAIS (Lógica do cache do Firestore) ---
+  List<MaterialEstimate> _estimateMaterials(
+      ProductModel product, int totalPairs) {
+    if (totalPairs <= 0) return [];
+
+    final Map<String, Map<String, dynamic>> summary = {};
+
+    for (final piece in product.pieces) {
+      final materialName = (piece.material).toString();
+      final colorName = (piece.color).toString();
+      final area = (piece.areaPerPair);
+
+      if (materialName.isEmpty) continue;
+
+      // --- MUDANÇA: Busca o material no cache síncrono ---
+      MaterialModel? materialData;
+      try {
+        materialData = _allMaterials.firstWhere((m) =>
+            m.name.toLowerCase().trim() == materialName.toLowerCase().trim());
+      } catch (e) {
+        materialData = null; // Material não encontrado no cache
+      }
+      // --- FIM DA MUDANÇA ---
+
+      if (materialData == null) continue; // Material não encontrado
+
+      final key = '$materialName||$colorName';
+      final current = summary[key] ?? {'meters': 0.0, 'pieces': <String>{}};
+
+      // Usa o 'height' do MaterialModel
+      final metersPerPair = (area > 0) ? (area / (materialData.height)) : 0.0;
+      final totalMeters = metersPerPair * totalPairs;
+
+      final double newMeters = (current['meters'] as double) + totalMeters;
+      final Set<String> newPieces =
+          Set<String>.from(current['pieces'] as Set<String>)..add(piece.name);
+
+      summary[key] = {'meters': newMeters, 'pieces': newPieces};
+    }
+
+    // Converte o mapa de resumo para a lista final
+    return summary.entries.map((entry) {
+      final parts = entry.key.split('||');
+      final meters = entry.value['meters'] as double;
+      final pieces = entry.value['pieces'] as Set<String>;
+      return MaterialEstimate(
+        material: parts[0],
+        color: parts[1],
+        meters: meters,
+        pieceNames: pieces.toList()..sort(),
+      );
+    }).toList();
+  }
+  // --- FIM DA MUDANÇA ---
+
   Future<void> _onSaveTicketOnly() async {
     if (!_validateInput()) return;
 
-    final ticketId =
-        _isEditing ? widget.ticketToEdit!.id : await _generateNextTicketId();
+    setState(() => _isLoading = true);
 
-    setState(() => _loading = true);
+    try {
+      final ticketId = await _generateNextTicketId();
 
-    await _createOrUpdateTicket(ticketId);
+      final Map<String, int> gradeMap = {
+        for (var n = 34; n <= 43; n++)
+          '$n': int.tryParse(_gradeCtrls['$n']!.text) ?? 0
+      };
 
-    if (mounted) {
-      if (_isEditing) {
-        Navigator.of(context).pop(true);
-      } else {
+      // --- MUDANÇA: Calcula o consumo de materiais (agora usa o cache) ---
+      final List<MaterialEstimate> consumption =
+          _estimateMaterials(_selected!, totalPares);
+      // --- FIM DA MUDANÇA ---
+
+      final newTicket = TicketModel(
+        id: ticketId,
+        teamId: widget.user.teamId,
+        productId: _selected!.id,
+        productName: _selected!.name,
+        productReference: _selected!.reference,
+        productColor: _selected!.color,
+        pairs: totalPares,
+        createdAt: Timestamp.now(), // <-- ESTÁ CORRETO
+        createdByUid: widget.user.uid,
+        status: TicketStatus.created,
+        currentSectorId: 'created',
+        currentSectorName: 'Criada',
+        lastMovedAt: Timestamp.now(), // <-- ESTÁ CORRETO
+        history: [],
+        cliente: _clienteCtrl.text.trim(),
+        pedido: _pedidoCtrl.text.trim(),
+        observacao: _obsCtrl.text.trim(),
+        grade: gradeMap,
+        materialsUsed: consumption, // <-- SALVA A LISTA DE CONSUMO
+      );
+
+      await FirebaseFirestore.instance
+          .collection('tickets')
+          .doc(ticketId)
+          .set(newTicket.toFirestore());
+
+      if (mounted) {
+        if (_isEditing) {
+          Navigator.of(context).pop(true);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Ficha $ticketId salva com sucesso!'),
+              backgroundColor: Colors.green[700],
+            ),
+          );
+          _clearAllFields();
+        }
+      }
+    } catch (e) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Ficha $ticketId salva com sucesso!'),
-            backgroundColor: Colors.green[700],
+            content: Text('Erro ao salvar ficha: $e'),
+            backgroundColor: Colors.red,
           ),
         );
-        _clearAllFields();
-        setState(() => _loading = false);
       }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // Popula campos (esta função não precisa de mudanças)
+  void _populateFromTicket(dynamic t) {
+    try {
+      final cliente = t.cliente ?? t.clientName ?? t['cliente'] ?? '';
+      final pedido = t.pedido ?? t.orderId ?? t['pedido'] ?? '';
+      final observacao = t.observacao ?? t.observation ?? t['observacao'] ?? '';
+
+      _clienteCtrl.text = cliente.toString();
+      _pedidoCtrl.text = pedido.toString();
+      _obsCtrl.text = observacao.toString();
+
+      final gradeMap = t.grade ?? t['grade'] ?? <String, dynamic>{};
+      if (gradeMap is Map) {
+        for (var key in gradeMap.keys) {
+          final k = key.toString();
+          final v = (gradeMap[key] is int)
+              ? gradeMap[key] as int
+              : int.tryParse('${gradeMap[key]}') ?? 0;
+          if (_gradeCtrls.containsKey(k)) {
+            _gradeCtrls[k]!.text = v > 0 ? v.toString() : '';
+          }
+        }
+      }
+
+      if (_products.isNotEmpty) {
+        final prodId = t.productId ??
+            t['productId'] ??
+            t.productId ??
+            t['idProduto'] ??
+            null;
+        final prodName = t.productName ??
+            t['productName'] ??
+            t.modelo ??
+            t['modelo'] ??
+            null;
+        ProductModel? found;
+        if (prodId != null) {
+          found = _products.firstWhere((p) => p.id == prodId.toString(),
+              orElse: () => _products.first);
+        } else if (prodName != null) {
+          found = _products.firstWhere((p) => p.name == prodName.toString(),
+              orElse: () => _products.first);
+        }
+        if (found != null) {
+          setState(() => _selected = found);
+        }
+      }
+    } catch (_) {
+      // Não fatal
     }
   }
 
@@ -203,17 +354,15 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEditing
-            ? 'Editar Ficha ${widget.ticketToEdit!.id}'
-            : 'Gerar Nova Ficha'),
+        title: Text(_isEditing ? 'Editar Ficha' : 'Gerar Nova Ficha'),
       ),
-      body: _loading
+      body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
               padding: const EdgeInsets.all(12),
               child: Column(
                 children: [
-                  DropdownButtonFormField<Product>(
+                  DropdownButtonFormField<ProductModel>(
                     value: _selected,
                     items: _products
                         .map((p) => DropdownMenuItem(
@@ -274,10 +423,21 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
                     width: double.infinity,
                     height: 48,
                     child: FilledButton.icon(
-                      onPressed: isReady ? _onSaveTicketOnly : null,
-                      icon: const Icon(Icons.save),
+                      onPressed:
+                          isReady && !_isLoading ? _onSaveTicketOnly : null,
+                      icon: _isLoading
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.save),
                       label: Text(
-                        _isEditing ? 'Salvar Alterações' : 'Salvar Ficha',
+                        _isLoading
+                            ? 'Salvando...'
+                            : (_isEditing
+                                ? 'Salvar Alterações'
+                                : 'Salvar Ficha'),
                         style: const TextStyle(fontSize: 16),
                       ),
                     ),
@@ -286,17 +446,5 @@ class _CreateTicketPageState extends State<CreateTicketPage> {
               ),
             ),
     );
-  }
-}
-
-// Extensão auxiliar
-extension IterableExt<T> on Iterable<T> {
-  T? firstWhereOrNull(bool Function(T) test) {
-    for (final element in this) {
-      if (test(element)) {
-        return element;
-      }
-    }
-    return null;
   }
 }

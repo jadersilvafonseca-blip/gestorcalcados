@@ -1,6 +1,10 @@
-// lib/pages/report_summary_page.dart
 import 'package:flutter/material.dart';
-import 'package:gestor_calcados_new/models/product.dart';
+
+// --- MUDANÇA (A CAUSA DO ERRO) ---
+// import 'package:gestor_calcados_new/models/product.dart'; // ANTIGO (REMOVIDO)
+import 'package:gestor_calcados_new/models/ticket_model.dart'; // NOVO (CORRIGIDO)
+// --- FIM DA MUDANÇA ---
+
 import 'package:share_plus/share_plus.dart';
 
 class ReportSummaryPage extends StatelessWidget {

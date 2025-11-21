@@ -1,63 +1,89 @@
 // lib/services/material_repository.dart
-import 'package:hive/hive.dart';
-
-// --- CORREÇÃO FINAL: Usamos o caminho de pacote (package:) ---
-// O Dart agora buscará o arquivo gerado a partir da raiz 'lib/'
-import 'package:gestor_calcados_new/models/material_item.dart';
-// ------------------------------------------------------------
-
-const String kMaterialsBox = 'materials_box';
+import 'package:cloud_firestore/cloud_firestore.dart';
+// O import do 'material_item.dart' (Hive) foi removido
+import 'package:gestor_calcados_new/models/material_model.dart';
+import 'package:flutter/foundation.dart'; // Para debugPrint
 
 class MaterialRepository {
-  // --- Singleton (CORRETO) ---
   static final MaterialRepository _instance = MaterialRepository._internal();
   factory MaterialRepository() {
     return _instance;
   }
   MaterialRepository._internal();
 
-  late Box<MaterialItem> _box;
-  bool _isInitialized = false;
+  // Remove as variáveis do Hive (_box, _isInitialized)
+  // Adiciona a instância do Firestore
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  static const String _collectionName = 'materials'; // O nome da sua coleção
 
-  // --- O REGISTRO DO ADAPTADOR ACONTECE AQUI ---
-  Future<void> init() async {
-    if (_isInitialized) return;
+  // O 'init()' não é mais necessário. O Firebase é inicializado no main.dart.
 
-    // 1. REGISTRA O ADAPTADOR
-    if (!Hive.isAdapterRegistered(MaterialItemAdapter().typeId)) {
-      Hive.registerAdapter(MaterialItemAdapter());
+  /// Salva (cria ou atualiza) um material no Firestore.
+  /// AGORA RECEBE O NOVO 'MaterialModel'
+  Future<void> saveMaterial(MaterialModel material) async {
+    try {
+      await _db
+          .collection(_collectionName)
+          .doc(material.id)
+          .set(material.toFirestore());
+    } catch (e) {
+      debugPrint('Erro em MaterialRepository.saveMaterial: $e');
+      rethrow; // Re-lança o erro para a UI (formulário) lidar
+    }
+  }
+
+  /// [MUDANÇA] Busca um material específico pelo seu ID de documento.
+  /// AGORA É ASSÍNCRONO e retorna um 'Future'
+  Future<MaterialModel?> getById(String id) async {
+    try {
+      final doc = await _db.collection(_collectionName).doc(id).get();
+      if (doc.exists) {
+        return MaterialModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Erro em MaterialRepository.getById: $e');
+      return null;
+    }
+  }
+
+  /// [MUDANÇA CRÍTICA] Busca todos os materiais PARA UM TIME (teamId).
+  /// Esta função agora é ASSÍNCRONA e REQUER o teamId.
+  Future<List<MaterialModel>> getAll(String teamId) async {
+    if (teamId.isEmpty) {
+      debugPrint(
+          'Aviso: MaterialRepository.getAll() chamado com teamId vazio.');
+      return [];
     }
 
-    // 2. Abre a caixa
-    _box = await Hive.openBox<MaterialItem>(kMaterialsBox);
+    try {
+      // Esta consulta requer um índice:
+      // Coleção: 'materials', Campo 1: 'teamId' (Crescente), Campo 2: 'name' (Crescente)
+      final query = await _db
+          .collection(_collectionName)
+          .where('teamId', isEqualTo: teamId)
+          .orderBy('name') // Mantém a ordenação alfabética
+          .get();
 
-    _isInitialized = true;
+      final materials =
+          query.docs.map((doc) => MaterialModel.fromFirestore(doc)).toList();
+      return materials;
+    } catch (e) {
+      debugPrint('Erro em MaterialRepository.getAll: $e');
+      // Se falhar (ex: índice faltando), retorna lista vazia
+      return [];
+    }
   }
 
-  Future<void> saveMaterial(MaterialItem material) async {
-    if (!_isInitialized) await init();
-
-    // Garante lista não-nula
-    material.colors = material.colors;
-
-    await _box.put(material.id, material);
-  }
-
-  MaterialItem? getById(String id) {
-    return _box.get(id);
-  }
-
-  List<MaterialItem> getAll() {
-    final materials = _box.values.toList();
-    materials.sort((a, b) => a.name.compareTo(b.name));
-    return materials;
-  }
-
+  /// [MUDANÇA] Deleta um material pelo seu ID.
+  /// (A lógica interna mudou, mas a chamada é a mesma)
   Future<void> deleteById(String id) async {
-    await _box.delete(id);
+    try {
+      await _db.collection(_collectionName).doc(id).delete();
+    } catch (e) {
+      debugPrint('Erro em MaterialRepository.deleteById: $e');
+    }
   }
 
-  Box<MaterialItem> getBox() {
-    return _box;
-  }
+  // A função getBox() foi removida pois era específica do Hive.
 }

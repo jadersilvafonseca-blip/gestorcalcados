@@ -1,129 +1,171 @@
-// lib/services/pdf_service.dart
-import 'dart:async';
 import 'dart:io';
-
-import 'package:flutter/foundation.dart' show debugPrint;
-import 'package:flutter/services.dart' show MissingPluginException;
+import 'dart:async';
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
+import 'package:flutter/services.dart' show MissingPluginException, ByteData;
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:barcode/barcode.dart';
-
-import '../models/ticket.dart';
+import 'package:cloud_firestore/cloud_firestore.dart' show Timestamp;
+// Este é o import CORRETO
+import 'package:gestor_calcados_new/models/ticket_model.dart';
 
 class PdfResult {
   final bool ok;
-  final String? path;
   final String? message;
-  const PdfResult({required this.ok, this.path, this.message});
+  final String? path;
+  const PdfResult({required this.ok, this.message, this.path});
 }
 
 class PdfService {
-  /// Gera a ficha em PDF (A5) e tenta compartilhar.
-  /// Se não conseguir, salva localmente e retorna o caminho.
-  static Future<PdfResult> generateAndShareTicket(
-    Ticket t, {
-    bool twoPerA4 = true,
-    double titleScale = 0.9,
-  }) async {
-    try {
-      final doc = pw.Document();
-      final ficha = _ticketA5(t, titleScale: titleScale);
+  // Esta é a função CORRETA para PDF agrupado
+  static Future<PdfResult> generateAndShareBatchPdf(
+      List<TicketModel> tickets) async {
+    debugPrint('--- [PdfService] EXECUTANDO A FUNÇÃO DE LOTE (AGRUPADO) ---');
+    debugPrint(
+        '--- [PdfService] Número de fichas recebidas: ${tickets.length} ---');
 
-      if (twoPerA4) {
-        // 2 fichas por página A4
-        doc.addPage(
-          pw.Page(
-            pageFormat: PdfPageFormat.a4,
-            margin: const pw.EdgeInsets.all(16),
-            build: (_) => pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+    final font = await PdfGoogleFonts.robotoRegular();
+    final boldFont = await PdfGoogleFonts.robotoBold();
+    final theme = pw.ThemeData.withFont(base: font, bold: boldFont);
+
+    // ============================================================
+    // --- RODAPÉ REMOVIDO (LINHAS COMENTADAS) ---
+    // ============================================================
+    // final nowDf = DateFormat('dd/MM/yyyy HH:mm');
+    // final footerText =
+    //     'Gerado em ${nowDf.format(DateTime.now())} • Minha Produção';
+
+    final doc = pw.Document();
+    for (int i = 0; i < tickets.length; i += 2) {
+      final first = tickets[i];
+      final second = (i + 1 < tickets.length) ? tickets[i + 1] : null;
+
+      doc.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          theme: theme,
+          // ============================================================
+          // --- CORREÇÃO DO ERRO 'footer' ---
+          // O rodapé foi REMOVIDO daqui...
+          // ============================================================
+          build: (context) {
+            // ...e foi MOVIDO para dentro do 'build'
+            return pw.Column(
               children: [
-                ficha,
-                pw.SizedBox(height: 8),
-                pw.Divider(thickness: 0.6, color: PdfColors.grey600),
-                pw.SizedBox(height: 8),
-                ficha,
+                // Este Expanded contém as duas fichas e o separador
+                pw.Expanded(
+                  child: pw.Column(
+                    children: [
+                      pw.Expanded(child: _fichaLayout(first)),
+                      pw.SizedBox(height: 8),
+                      _dottedSeparatorFullWidth(),
+                      pw.SizedBox(height: 8),
+                      if (second != null)
+                        pw.Expanded(child: _fichaLayout(second))
+                      else
+                        pw.Expanded(child: pw.Container()),
+                    ],
+                  ),
+                ),
+                // ============================================================
+                // --- Rodapé MOVIDO PARA CÁ ---
+                // --- AGORA REMOVIDO (BLOCO COMENTADO) ---
+                // ============================================================
+                // pw.Container(
+                //   alignment: pw.Alignment.center,
+                //   padding: const pw.EdgeInsets.only(top: 8.0),
+                //   decoration: const pw.BoxDecoration(
+                //     border: pw.Border(
+                //         top: pw.BorderSide(
+                //             color: PdfColors.grey400, width: 0.5)),
+                //   ),
+                //   child: pw.Text(
+                //     footerText,
+                //     style: const pw.TextStyle(
+                //         fontSize: 8.5, color: PdfColors.grey600),
+                //   ),
+                // ),
               ],
-            ),
-          ),
-        );
-      } else {
-        // 1 ficha por página A5
-        doc.addPage(
-          pw.Page(
-            pageFormat: PdfPageFormat.a5,
-            margin: const pw.EdgeInsets.all(16),
-            build: (_) => ficha,
-          ),
-        );
-      }
-
-      final bytes = await doc.save();
-      final fileName = 'ficha_${t.id}.pdf';
-
-      // 1) Tenta compartilhar
-      try {
-        await Printing.sharePdf(bytes: bytes, filename: fileName)
-            .timeout(const Duration(seconds: 10));
-        return const PdfResult(ok: true, message: 'PDF compartilhado.');
-      } on MissingPluginException {
-        // plugin não disponível ainda — segue para salvar
-      } on TimeoutException {
-        // timeout — segue para salvar
-      } catch (e) {
-        debugPrint('[PdfService] Falha ao compartilhar: $e');
-      }
-
-      // 2) Fallback: salvar local
-      String? savedPath;
-      try {
-        final tmp = await getTemporaryDirectory();
-        final file = File('${tmp.path}/$fileName');
-        await file.writeAsBytes(bytes, flush: true);
-        savedPath = file.path;
-      } catch (e) {
-        debugPrint('[PdfService] Erro ao salvar PDF: $e');
-      }
-
-      return PdfResult(
-        ok: false,
-        path: savedPath,
-        message: savedPath == null
-            ? 'PDF gerado, mas não foi possível salvar.'
-            : 'PDF salvo em:\n$savedPath',
+            );
+          },
+        ),
       );
-    } catch (e, st) {
-      debugPrint('[PdfService] ERRO GERAL: $e\n$st');
-      return PdfResult(ok: false, message: 'Falha ao gerar PDF: $e');
     }
+
+    return await _saveOrShare(
+        doc, 'fichas_${DateTime.now().millisecondsSinceEpoch}.pdf');
   }
 
-  // ----------------------- Construção visual -----------------------
+  // Esta é a função CORRETA para PDF único
+  static Future<PdfResult> generateAndShareTicket(TicketModel t) async {
+    debugPrint('--- [PdfService] EXECUTANDO A FUNÇÃO DE FICHA ÚNICA ---');
 
-  static pw.Widget _ticketA5(Ticket t, {double titleScale = 0.9}) {
-    final nowDf = DateFormat('dd/MM/yyyy HH:mm');
+    final font = await PdfGoogleFonts.robotoRegular();
+    final boldFont = await PdfGoogleFonts.robotoBold();
+    final theme = pw.ThemeData.withFont(base: font, bold: boldFont);
 
-    // total: soma da grade (se houver) senão usa pairs
+    // ============================================================
+    // --- RODAPÉ REMOVIDO (LINHAS COMENTADAS) ---
+    // ============================================================
+    // final nowDf = DateFormat('dd/MM/yyyy HH:mm');
+    // final footerText =
+    //     'Gerado em ${nowDf.format(DateTime.now())} • Minha Produção';
+
+    final doc = pw.Document();
+    doc.addPage(pw.Page(
+      pageFormat: PdfPageFormat.a5,
+      margin: const pw.EdgeInsets.all(16),
+      theme: theme,
+      // ============================================================
+      // --- CORREÇÃO DO ERRO 'footer' ---
+      // O rodapé foi REMOVIDO daqui...
+      // ============================================================
+      build: (_) {
+        // ...e foi MOVIDO para dentro do 'build'
+        return pw.Column(
+          children: [
+            pw.Expanded(child: _fichaLayout(t)), // A ficha ocupa o espaço
+            // ============================================================
+            // --- Rodapé MOVIDO PARA CÁ ---
+            // --- AGORA REMOVIDO (BLOCO COMENTADO) ---
+            // ============================================================
+            // pw.Container(
+            //   alignment: pw.Alignment.center,
+            //   margin: const pw.EdgeInsets.only(top: 10.0),
+            //   padding: const pw.EdgeInsets.only(top: 8.0),
+            //   decoration: const pw.BoxDecoration(
+            //     border: pw.Border(
+            //         top: pw.BorderSide(color: PdfColors.grey400, width: 0.5)),
+            //   ),
+            //   child: pw.Text(
+            //     footerText,
+            //     style:
+            //         const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey600),
+            //   ),
+            // ),
+          ],
+        );
+      },
+    ));
+    return await _saveOrShare(doc, 'ficha_${t.id}.pdf');
+  }
+
+  // Este é o layout CORRETO com seus ajustes
+  static pw.Widget _fichaLayout(TicketModel t) {
     final total = _sumGrade(t.grade) ?? t.pairs;
-
-    // payload do QR conforme sua descrição (id + total + modelo/cor/marca)
     final qrPayload =
-        'TKT|${t.id}|${t.modelo}|${t.cor}|${t.marca}|$total'; // formato: TK|id|modelo|cor|marca|total
+        'TKT|${t.id}|${t.productName}|${t.productColor}|${t.productReference}|$total';
     final qr = Barcode.qrCode();
     final qrSvg = qr.toSvg(qrPayload, width: 160, height: 160);
 
-    // "referência" não existe no seu Ticket: mostra traço
     const referencia = '—';
     final cliente = (t.cliente.isNotEmpty) ? t.cliente : '—';
 
     return pw.Container(
-      padding: const pw.EdgeInsets.all(12),
-      decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: PdfColors.grey600),
-      ),
       child: pw.Column(
         crossAxisAlignment: pw.CrossAxisAlignment.stretch,
         children: [
@@ -138,89 +180,64 @@ class PdfService {
                     pw.Text(
                       'FICHA DE PRODUÇÃO',
                       style: pw.TextStyle(
-                        fontSize: 22 * titleScale,
+                        fontSize: 18,
                         fontWeight: pw.FontWeight.bold,
-                      ),
-                    ),
-                    pw.SizedBox(height: 3),
-                    pw.Text(
-                      'Gestor de Calçados',
-                      style: const pw.TextStyle(
-                        fontSize: 11,
-                        color: PdfColors.grey700,
                       ),
                     ),
                     pw.SizedBox(height: 10),
                     _kv('Nº Ficha', t.id),
                     _kv('Cliente', cliente),
-                    _kv('Total de pares', '$total'),
-                    _kv('Entrega', '—'), // não há campo de entrega no Ticket
+                    _kv('Data',
+                        _formatTimestampForDisplay(t.lastMovedAt, null)),
                   ],
                 ),
               ),
               pw.SizedBox(width: 12),
+              // QR Code (sem borda)
               pw.Container(
-                width: 120,
-                child: pw.Column(
-                  children: [
-                    pw.Container(
-                      padding: const pw.EdgeInsets.all(4),
-                      decoration: pw.BoxDecoration(
-                        border: pw.Border.all(color: PdfColors.black, width: 1),
-                      ),
-                      child: pw.Center(child: pw.SvgImage(svg: qrSvg)),
-                    ),
-                    pw.SizedBox(height: 4),
-                    pw.Text(
-                      'QR: $qrPayload',
-                      style: const pw.TextStyle(
-                        fontSize: 7.5,
-                        color: PdfColors.grey600,
-                      ),
-                      textAlign: pw.TextAlign.center,
-                    ),
-                  ],
-                ),
+                width: 64,
+                height: 64,
+                child: pw.Center(child: pw.SvgImage(svg: qrSvg)),
               ),
             ],
           ),
           pw.SizedBox(height: 8),
+
+          // Linha REF / MODELO / COR / MARCA
           pw.Text(
-            'REF: $referencia  •  MODELO: ${t.modelo}  •  COR: ${t.cor}  •  MARCA: ${t.marca}',
+            'REF: ${t.productReference.isNotEmpty ? t.productReference : '—'}  •  MODELO: ${t.productName}  •  COR: ${t.productColor}',
             style: const pw.TextStyle(fontSize: 10.5),
-          ),
-          pw.SizedBox(height: 8),
-          pw.Text(
-            'Grade (pares por numeração)',
-            style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey600),
           ),
           pw.SizedBox(height: 3),
           _gradeTable(t),
-          pw.SizedBox(height: 8),
-          pw.Container(
-            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            decoration: pw.BoxDecoration(
-              border: pw.Border.all(color: PdfColors.black, width: 1),
-            ),
-            child: pw.Text(
-              'TOTAL DE PARES: $total',
-              style: pw.TextStyle(
-                fontSize: 13.5,
-                fontWeight: pw.FontWeight.bold,
+          // Total de pares (sem borda e alinhado à direita)
+          pw.Row(
+            children: [
+              pw.Spacer(),
+              pw.Text(
+                'TOTAL DE PARES: $total',
+                style: pw.TextStyle(
+                  fontSize: 12,
+                  fontWeight: pw.FontWeight.bold,
+                ),
               ),
-            ),
+            ],
           ),
           pw.SizedBox(height: 12),
-          pw.Text(
-            'Gerado em ${nowDf.format(DateTime.now())} • App Gestor de Calçados',
-            style: const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey600),
+
+          // Bloco de Consumo de Materiais
+          pw.Text('CONSUMO DE MATERIAIS',
+              style:
+                  pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 8),
+          // Usamos Flexible/Expanded para o consumo ocupar o espaço restante
+          pw.Flexible(
+            child: _buildConsumptionColumns(t),
           ),
         ],
       ),
     );
   }
-
-  // ----------------------- Helpers -----------------------
 
   static int? _sumGrade(Map<String, int> grade) {
     if (grade.isEmpty) return null;
@@ -256,8 +273,18 @@ class PdfService {
         ],
       );
 
-  static pw.Widget _gradeTable(Ticket t) {
-    final numeros = (t.grade.keys.toList()..sort());
+  static pw.Widget _gradeTable(TicketModel t) {
+    // Corrigido para garantir que as chaves sejam strings (como 34, 35...)
+    final keys = t.grade.keys.toList();
+    // Tenta ordenar numericamente
+    try {
+      keys.sort((a, b) => int.parse(a).compareTo(int.parse(b)));
+    } catch (e) {
+      keys.sort(); // Fallback para ordenação de string
+    }
+
+    final numeros = keys;
+
     if (numeros.isEmpty) {
       return pw.Container(
         padding: const pw.EdgeInsets.all(8),
@@ -306,5 +333,158 @@ class PdfService {
         ),
       ),
     );
+  }
+
+  static pw.Widget _buildConsumptionColumns(TicketModel t) {
+    final items = t.materialsUsed;
+    if (items.isEmpty) {
+      return pw.Text('(Sem consumo de materiais)',
+          style: pw.TextStyle(fontSize: 9));
+    }
+
+    items.sort((a, b) => a.material.compareTo(b.material));
+
+    final half = (items.length / 2).ceil();
+    final left = items.sublist(0, half);
+    final right = items.sublist(half);
+
+    pw.Widget columnOf(List<MaterialEstimate> list) {
+      return pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: list.map((m) {
+          return pw.Padding(
+            padding: const pw.EdgeInsets.only(bottom: 8),
+            child: pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Expanded(
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('${m.material} (${m.color})',
+                          style: pw.TextStyle(
+                              fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                      pw.Text('Peças: ${m.pieceNames.join(', ')}',
+                          style: pw.TextStyle(
+                              fontSize: 8, color: PdfColors.grey700)),
+                    ],
+                  ),
+                ),
+                pw.Container(
+                  width: 72,
+                  alignment: pw.Alignment.topRight,
+                  child: pw.Text(
+                      '${m.meters.toStringAsFixed(2).replaceAll('.', ',')} m',
+                      style: pw.TextStyle(
+                          fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      );
+    }
+
+    return pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Expanded(child: columnOf(left)),
+        pw.SizedBox(width: 18),
+        pw.Expanded(child: columnOf(right)),
+      ],
+    );
+  }
+
+  static pw.Widget _dottedSeparatorFullWidth() {
+    const dots = 72;
+    return pw.Container(
+      alignment: pw.Alignment.center,
+      child: pw.Row(
+        mainAxisAlignment: pw.MainAxisAlignment.center,
+        children: List.generate(dots, (i) {
+          return pw.Padding(
+            padding: const pw.EdgeInsets.symmetric(horizontal: 1),
+            child: pw.Container(
+              width: 2,
+              height: 2,
+              decoration: pw.BoxDecoration(
+                color: PdfColors.grey,
+                shape: pw.BoxShape.circle,
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  static Future<PdfResult> _saveOrShare(
+      pw.Document doc, String filename) async {
+    try {
+      final bytes = await doc.save();
+      debugPrint('[PdfService] bytes gerados: ${bytes.length}');
+
+      if (kIsWeb) {
+        try {
+          await Printing.layoutPdf(
+              onLayout: (format) async => bytes, name: filename);
+          return const PdfResult(ok: true, message: 'PDF aberto no navegador.');
+        } catch (e, st) {
+          debugPrint('[PdfService] erro web layoutPdf: $e\n$st');
+          return PdfResult(
+              ok: false, message: 'Erro abrir PDF no navegador: $e');
+        }
+      }
+
+      try {
+        await Printing.sharePdf(bytes: bytes, filename: filename)
+            .timeout(const Duration(seconds: 12));
+        return const PdfResult(ok: true, message: 'PDF compartilhado.');
+      } on MissingPluginException catch (e) {
+        debugPrint('[PdfService] missing plugin sharePdf: $e');
+      } on TimeoutException catch (e) {
+        debugPrint('[PdfService] timeout sharePdf: $e');
+      } catch (e, st) {
+        debugPrint('[PdfService] erro sharePdf: $e\n$st');
+      }
+
+      try {
+        final tmp = await getTemporaryDirectory();
+        final path = '${tmp.path}/$filename';
+        final file = File(path);
+        await file.writeAsBytes(bytes, flush: true);
+        debugPrint('[PdfService] PDF salvo: $path');
+        return PdfResult(ok: true, message: 'PDF salvo em: $path', path: path);
+      } catch (e, st) {
+        debugPrint('[PdfService] erro salvar PDF: $e\n$st');
+        return PdfResult(ok: false, message: 'Erro ao salvar PDF: $e');
+      }
+    } catch (e, st) {
+      debugPrint('[PdfService] ERRO GERAL: $e\n$st');
+      return PdfResult(ok: false, message: 'Falha ao gerar PDF: $e');
+    }
+  }
+
+  static String _formatTimestampForDisplay(dynamic maybeTs, dynamic d) {
+    if (maybeTs == null) return '??';
+    try {
+      if (maybeTs is Timestamp) {
+        final d = maybeTs.toDate().toLocal();
+        return '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} '
+            '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}:${d.second.toString().padLeft(2, '0')}';
+      } else if (maybeTs is DateTime) {
+        final d = maybeTs.toLocal();
+        return '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} '
+            '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}:${d.second.toString().padLeft(2, '0')}';
+      } else {
+        final s = maybeTs.toString();
+        if (s.startsWith('Timestamp(')) return s;
+        final parsed = DateTime.parse(s).toLocal();
+        return '${parsed.day.toString().padLeft(2, '0')}/${parsed.month.toString().padLeft(2, '0')}/${parsed.year} '
+            '${parsed.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}:${d.second.toString().padLeft(2, '0')}';
+      }
+    } catch (_) {
+      return maybeTs.toString();
+    }
   }
 }

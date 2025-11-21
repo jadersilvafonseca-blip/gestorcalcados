@@ -1,37 +1,36 @@
+// tickets_page.dart (CORRIGIDO PARA PDF EM LOTE)
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:hive_flutter/hive_flutter.dart';
-import 'package:gestor_calcados_new/services/hive_service.dart';
-import 'package:gestor_calcados_new/models/ticket.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:gestor_calcados_new/models/app_user_model.dart';
+import 'package:gestor_calcados_new/models/ticket_model.dart';
 import 'package:gestor_calcados_new/pages/ticket_details_page.dart';
-import 'package:gestor_calcados_new/services/ticket_pdf_service.dart';
-
-// --- NOVOS IMPORTS ADICIONADOS ---
 import 'package:gestor_calcados_new/pages/report_summary_page.dart';
-import 'package:gestor_calcados_new/models/product.dart'; // Para MaterialEstimate
-// Mantemos o import para o FAB, se necessário, ou usamos na página de resumo
-// ---------------------------------
+// Importe o PdfService e o PdfResult
+import 'package:gestor_calcados_new/services/pdf_service.dart';
 
 class TicketsPage extends StatefulWidget {
-  const TicketsPage({super.key});
+  final AppUserModel user;
+  const TicketsPage({super.key, required this.user});
 
   @override
   State<TicketsPage> createState() => _TicketsPageState();
 }
 
 class _TicketsPageState extends State<TicketsPage> {
-  final Set<String> _selectedIds = {};
-  bool _isLoading = false;
-  List<Ticket> _allTickets = [];
-
+  final Set<String> _selectedTicketIds = {};
+  List<TicketModel> _allTickets = [];
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+
+  bool get _isSelecting => _selectedTicketIds.isNotEmpty;
 
   @override
   void initState() {
     super.initState();
     _searchController.addListener(() {
       setState(() {
-        _searchQuery = _searchController.text.toLowerCase();
+        _searchQuery = _searchController.text;
       });
     });
   }
@@ -42,167 +41,222 @@ class _TicketsPageState extends State<TicketsPage> {
     super.dispose();
   }
 
-  void _toggleSelection(String id) {
+  String _formatTimestamp(dynamic maybeTs) {
+    if (maybeTs == null) return '??';
+    DateTime dt;
+    if (maybeTs is Timestamp) {
+      dt = maybeTs.toDate().toLocal();
+    } else if (maybeTs is DateTime) {
+      dt = maybeTs.toLocal();
+    } else {
+      try {
+        dt = DateTime.parse(maybeTs.toString()).toLocal();
+      } catch (_) {
+        return maybeTs.toString();
+      }
+    }
+    return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  void _toggleSelection(String ticketId) {
     setState(() {
-      if (_selectedIds.contains(id)) {
-        _selectedIds.remove(id);
+      if (_selectedTicketIds.contains(ticketId)) {
+        _selectedTicketIds.remove(ticketId);
       } else {
-        _selectedIds.add(id);
+        _selectedTicketIds.add(ticketId);
       }
     });
   }
 
-  void _navigateToDetails(Ticket ticket) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => TicketDetailsPage(ticket: ticket),
-      ),
-    );
+  void _clearSelection() {
+    setState(() {
+      _selectedTicketIds.clear();
+    });
   }
 
-  Future<void> _generateBatchPdf() async {
-    setState(() => _isLoading = true);
+  void _navigateToDetails(TicketModel ticket) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => TicketDetailsPage(ticket: ticket),
+    ));
+  }
 
+  void _processConsumptionReport() {
     final selectedTickets =
-        _allTickets.where((t) => _selectedIds.contains(t.id)).toList();
+        _allTickets.where((t) => _selectedTicketIds.contains(t.id)).toList();
 
     if (selectedTickets.isEmpty) {
-      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nenhuma ficha selecionada.')),
+      );
       return;
     }
+
+    final Map<String, (double, List<String>)> combinedMap = {};
+    for (final ticket in selectedTickets) {
+      for (final est in ticket.materialsUsed) {
+        final key = '${est.material}|${est.color}';
+        if (combinedMap.containsKey(key)) {
+          final existing = combinedMap[key]!;
+          final newMeters = existing.$1 + est.meters;
+          final newPieces =
+              (existing.$2..addAll(est.pieceNames)).toSet().toList();
+          combinedMap[key] = (newMeters, newPieces);
+        } else {
+          combinedMap[key] = (est.meters, List<String>.from(est.pieceNames));
+        }
+      }
+    }
+
+    final estimates = combinedMap.entries.map((entry) {
+      final parts = entry.key.split('|');
+      final data = entry.value;
+      return MaterialEstimate(
+        material: parts[0],
+        color: parts[1],
+        meters: data.$1,
+        pieceNames: data.$2..sort(),
+      );
+    }).toList()
+      ..sort((a, b) => a.material.compareTo(b.material));
+
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ReportSummaryPage(
+        ticketIds: _selectedTicketIds.toList()..sort(),
+        estimates: estimates,
+      ),
+    ));
+    _clearSelection();
+  }
+
+  // =======================================================================
+  // --- SEÇÃO MODIFICADA (LÓGICA DO PDF AGRUPADO) ---
+  // ESTA É A VERSÃO CORRETA (SEM LOOP 'FOR')
+  // =======================================================================
+  Future<void> _processBatchPdf() async {
+    final List<TicketModel> selectedTickets =
+        _allTickets.where((t) => _selectedTicketIds.contains(t.id)).toList();
+
+    if (selectedTickets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nenhuma ficha selecionada.')),
+      );
+      return;
+    }
+
+    // Ordena pela data (usando lastMovedAt que sabemos que existe)
+    selectedTickets.sort((a, b) {
+      // Ordena do mais antigo para o mais novo
+      return (a.lastMovedAt ?? Timestamp(0, 0))
+          .compareTo(b.lastMovedAt ?? Timestamp(0, 0));
+    });
+
+    // --- MUDANÇA: LÓGICA DE PDF AGRUPADO ---
+    // Agora chamamos a *nova* função no PdfService que
+    // aceita a LISTA INTEIRA de fichas para criar um único PDF.
+
+    String feedbackMessage;
+    Color feedbackColor;
 
     try {
-      await TicketPdfService.generateBatchPdf(selectedTickets);
+      // 1. CHAMA A FUNÇÃO DE LOTE (generateAndShareBatchPdf) UMA VEZ
+      final PdfResult result =
+          await PdfService.generateAndShareBatchPdf(selectedTickets);
+
+      // 2. Processa o resultado único
+      if (result.ok) {
+        feedbackMessage = 'Sucesso! PDF agrupado compartilhado.';
+        feedbackColor = Colors.green;
+      } else {
+        feedbackMessage = 'Falha ao gerar PDF: ${result.message}';
+        debugPrint('Erro no PDF em lote: ${result.message}');
+        feedbackColor = Colors.red;
+      }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro ao gerar PDF: $e')),
-        );
-      }
+      feedbackMessage = 'Erro inesperado: $e';
+      debugPrint('Erro no PDF em lote: $e');
+      feedbackColor = Colors.red;
     }
-
-    setState(() {
-      _isLoading = false;
-      _selectedIds.clear();
-    });
-  }
-
-  // --- FUNÇÃO PARA CALCULAR E NAVEGAR PARA VISUALIZAÇÃO (CORREÇÃO DE FLUXO) ---
-  Future<void> _onGenerateAndNavigateToReport() async {
-    setState(() => _isLoading = true);
-
-    final selectedTickets =
-        _allTickets.where((t) => _selectedIds.contains(t.id)).toList();
-
-    if (selectedTickets.isEmpty) {
-      setState(() => _isLoading = false);
-      return;
-    }
-
-    // 1. Agregação (soma) do Consumo
-    final ticketIds = selectedTickets.map((t) => t.id).toList()..sort();
-    final Map<String, (double, Set<String>)> summary = {};
-
-    for (final ticket in selectedTickets) {
-      if (ticket.materialsUsed.isEmpty) continue;
-
-      for (final estimate in ticket.materialsUsed) {
-        final key = '${estimate.material}||${estimate.color}';
-        final current = summary[key] ?? (0.0, <String>{});
-
-        final newMeters = current.$1 + estimate.meters;
-        final newPieces = current.$2..addAll(estimate.pieceNames);
-
-        summary[key] = (newMeters, newPieces);
-      }
-    }
-
-    // 2. Converte o Mapa de resumo para a lista final de MaterialEstimate
-    final List<MaterialEstimate> finalReport = [];
-    final List<MapEntry<String, (double, Set<String>)>> sortedSummary =
-        summary.entries.toList();
-    sortedSummary.sort((a, b) => a.key.compareTo(b.key));
-
-    for (var entry in sortedSummary) {
-      final totalMeters = entry.value.$1;
-      final pieces = entry.value.$2.toList()..sort();
-
-      final parts = entry.key.split('||');
-      final material = parts[0];
-      final color = parts.length > 1 ? parts[1] : '';
-
-      finalReport.add(MaterialEstimate(
-        material: material,
-        color: color,
-        meters: totalMeters,
-        pieceNames: pieces,
-      ));
-    }
+    // --- FIM DA MUDANÇA ---
 
     if (!mounted) return;
 
-    // 3. NAVEGA para a nova página de Relatório para VISUALIZAÇÃO
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ReportSummaryPage(
-          ticketIds: ticketIds,
-          estimates: finalReport,
-        ),
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(feedbackMessage),
+        backgroundColor: feedbackColor,
       ),
     );
 
-    // 4. Limpa a seleção e o loading
-    setState(() {
-      _isLoading = false;
-      _selectedIds.clear();
-    });
+    _clearSelection();
   }
-  // --- FIM DA FUNÇÃO DE NAVEGAÇÃO ---
+  // =======================================================================
+  // --- FIM DA SEÇÃO MODIFICADA ---
+  // =======================================================================
+
+  AppBar _buildAppBar() {
+    if (_isSelecting) {
+      return AppBar(
+        title: Text('${_selectedTicketIds.length} selecionadas'),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: _clearSelection,
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add_chart_outlined),
+            tooltip: 'Somar Consumo',
+            onPressed: _processConsumptionReport,
+          ),
+          IconButton(
+            icon: const Icon(Icons.print_outlined),
+            tooltip: 'Gerar PDFs', // Nome do botão corrigido
+            onPressed: _processBatchPdf,
+          ),
+        ],
+      );
+    } else {
+      return AppBar(title: const Text('Fichas Salvas'));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final bool isSelecting = _selectedIds.isNotEmpty;
+    // ============================================================
+    // --- Verificação do teamId (Manter para debug) ---
+    // ============================================================
+    if (kDebugMode) {
+      print('===================================================');
+      print('CONSULTANDO FICHAS PARA O teamId: ${widget.user.teamId}');
+      print('===================================================');
+    }
+    // ============================================================
+
+    // ============================================================
+    // --- ALTERAÇÃO 1: Consulta usa 'lastMovedAt' ---
+    // ============================================================
+    // ATENÇÃO: Verifique se você criou o índice no Firebase:
+    // Coleção: 'tickets', Campo 1: 'teamId' (Crescente), Campo 2: 'lastMovedAt' (Decrescente)
+    // ============================================================
+    final Stream<QuerySnapshot<Map<String, dynamic>>> stream =
+        FirebaseFirestore.instance
+            .collection('tickets')
+            .where('teamId', isEqualTo: widget.user.teamId)
+            .orderBy('lastMovedAt', descending: true) // <-- CORRIGIDO AQUI
+            .snapshots();
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(isSelecting
-            ? '${_selectedIds.length} selecionadas'
-            : 'Fichas Salvas'),
-
-        // --- APPBAR ACTIONS ATUALIZADA (SÓ RELATÓRIO E LIMPAR) ---
-        actions: [
-          if (isSelecting) ...[
-            // 1. BOTÃO DE VISUALIZAR RELATÓRIO (A ÚNICA OPÇÃO NA APPBAR)
-            IconButton(
-              icon: const Icon(Icons.list_alt), // Ícone de relatório/lista
-              tooltip: 'Ver Relatório de Consumo',
-              onPressed: _isLoading
-                  ? null
-                  : _onGenerateAndNavigateToReport, // CORREÇÃO DE FLUXO
-            ),
-
-            // 2. Botão de Limpar
-            IconButton(
-                icon: const Icon(Icons.clear_all),
-                tooltip: 'Limpar seleção',
-                onPressed: () {
-                  setState(() => _selectedIds.clear());
-                }),
-            // O BOTÃO DE PDF FOI MOVIDO PARA O FAB
-          ]
-        ],
-        // --- FIM DA ATUALIZAÇÃO ---
-      ),
+      appBar: _buildAppBar(),
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(8.0),
+            padding: const EdgeInsets.all(8),
             child: TextField(
               controller: _searchController,
               decoration: InputDecoration(
-                labelText: 'Pesquisar Ficha, Modelo, Cor, Cliente...',
+                labelText: 'Pesquisar Fichas',
                 prefixIcon: const Icon(Icons.search),
-                suffixIcon: _searchQuery.isNotEmpty
+                suffixIcon: _searchController.text.isNotEmpty
                     ? IconButton(
                         icon: const Icon(Icons.clear),
                         onPressed: () {
@@ -211,128 +265,87 @@ class _TicketsPageState extends State<TicketsPage> {
                       )
                     : null,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8.0),
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
             ),
           ),
           Expanded(
-            child: ValueListenableBuilder<Box>(
-              valueListenable: HiveService.listenable()!,
-              builder: (context, box, _) {
-                _allTickets = HiveService.getAllTickets();
-
-                final List<Ticket> filteredTickets;
-                if (_searchQuery.isEmpty) {
-                  filteredTickets = _allTickets;
-                } else {
-                  filteredTickets = _allTickets.where((ticket) {
-                    final ticketId = ticket.id.toLowerCase();
-                    final modelo = ticket.modelo.toLowerCase();
-                    final cor = ticket.cor.toLowerCase();
-                    final cliente = ticket.cliente.toLowerCase();
-
-                    return ticketId.contains(_searchQuery) ||
-                        modelo.contains(_searchQuery) ||
-                        cor.contains(_searchQuery) ||
-                        cliente.contains(_searchQuery);
-                  }).toList();
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: stream,
+              builder: (context, snap) {
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
                 }
+                if (snap.hasError) {
+                  if (kDebugMode) {
+                    print('!!!!!!!! ERRO NO STREAMBUILDER !!!!!!!!');
+                    print(snap.error);
+                    print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+                  }
+                  return Center(child: Text('Erro: ${snap.error}'));
+                }
+
+                final docs = snap.data?.docs ?? [];
+                _allTickets =
+                    docs.map((d) => TicketModel.fromFirestore(d)).toList();
+
+                final query = _searchQuery.toLowerCase().trim();
+                final filteredTickets = query.isEmpty
+                    ? _allTickets
+                    : _allTickets.where((t) {
+                        return (t.id.toLowerCase().contains(query) ||
+                            t.cliente.toLowerCase().contains(query) ||
+                            t.productName.toLowerCase().contains(query) ||
+                            t.productReference.toLowerCase().contains(query) ||
+                            t.productColor.toLowerCase().contains(query) ||
+                            t.pedido.toLowerCase().contains(query));
+                      }).toList();
 
                 if (filteredTickets.isEmpty) {
                   return Center(
-                      child: Text(_allTickets.isEmpty
-                          ? 'Nenhuma ficha salva.'
-                          : 'Nenhuma ficha encontrada para "$_searchQuery".'));
+                    child: Text(_allTickets.isEmpty
+                        ? 'Nenhuma ficha encontrada.'
+                        : 'Nenhum resultado para "$_searchQuery".'),
+                  );
                 }
 
                 return ListView.separated(
                   itemCount: filteredTickets.length,
-                  separatorBuilder: (_, __) => const Divider(height: 0),
-                  itemBuilder: (context, i) {
-                    final t = filteredTickets[i];
-                    final isSelected = _selectedIds.contains(t.id);
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final t = filteredTickets[index];
+
+                    // ============================================================
+                    // --- ALTERAÇÃO 2: Subtítulo usa 'lastMovedAt' ---
+                    // ============================================================
+                    final subtitle = (t.cliente.isNotEmpty
+                            ? '${t.cliente} • '
+                            : '') +
+                        _formatTimestamp(t.lastMovedAt); // <-- CORRIGIDO AQUI
+
+                    final isSelected = _selectedTicketIds.contains(t.id);
 
                     return ListTile(
-                      tileColor: isSelected
-                          ? Theme.of(context).primaryColor.withOpacity(0.1)
-                          : null,
-                      leading: isSelected
-                          ? Icon(Icons.check_circle,
-                              color: Theme.of(context).primaryColor)
-                          : const Icon(Icons.receipt_long_outlined),
-                      title: Text('Ficha ${t.id} • ${t.modelo} ${t.cor}'),
-                      subtitle: Text('Marca: ${t.marca} • Pares: ${t.pairs}'),
-                      onLongPress: () {
-                        _toggleSelection(t.id);
-                      },
+                      leading: CircleAvatar(child: Text(t.pairs.toString())),
+                      title: Text('${t.id} • ${t.productName}'),
+                      subtitle: Text(subtitle),
+                      trailing: const Icon(Icons.chevron_right),
+                      selected: isSelected,
+                      selectedTileColor: Colors.blue.withOpacity(0.1),
                       onTap: () {
-                        if (isSelecting) {
+                        if (_isSelecting) {
                           _toggleSelection(t.id);
                         } else {
                           _navigateToDetails(t);
                         }
                       },
-                      trailing: isSelecting
-                          ? null
-                          : IconButton(
-                              icon: const Icon(Icons.delete_outline,
-                                  color: Colors.red),
-                              onPressed: () {
-                                _confirmDelete(context, t);
-                              },
-                            ),
+                      onLongPress: () => _toggleSelection(t.id),
                     );
                   },
                 );
               },
             ),
-          ),
-        ],
-      ),
-      // --- FAB (Floating Action Button): SÓ PDF ---
-      floatingActionButton: isSelecting
-          ? FloatingActionButton.extended(
-              icon: _isLoading
-                  ? const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2,
-                      ),
-                    )
-                  : const Icon(Icons.picture_as_pdf),
-              label: Text('Gerar PDF (${_selectedIds.length})'),
-              onPressed: _isLoading ? null : _generateBatchPdf,
-            )
-          : null,
-      // --- FIM DO FAB ---
-    );
-  }
-
-  void _confirmDelete(BuildContext context, Ticket ticket) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Excluir Ficha?'),
-        content: Text(
-            'Tem certeza que deseja excluir a ficha ${ticket.id} (${ticket.modelo})?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancelar'),
-          ),
-          TextButton(
-            onPressed: () {
-              HiveService.deleteById(ticket.id);
-              Navigator.of(ctx).pop();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                    content: Text('Ficha ${ticket.id} excluída com sucesso.')),
-              );
-            },
-            child: const Text('Excluir', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
