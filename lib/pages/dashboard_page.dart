@@ -1672,17 +1672,15 @@ class _WorkInProgressContentState extends State<_WorkInProgressContent> {
       final sectorId = ficha['sector']?.toString() ?? kTransitSectorId;
       final inTransit = (sectorId == kTransitSectorId);
 
-      // Buscar o último setor de origem quando estiver em trânsito
       final lastSectorId = ficha['lastSectorId']?.toString();
-      final lastSectorName = lastSectorId != null
-          ? _getSectorName(lastSectorId)
-          : null; // USA FUNÇÃO GLOBAL
+      final lastSectorName =
+          lastSectorId != null ? _getSectorName(lastSectorId) : null;
 
       String sectorDisplayText;
       if (inTransit && lastSectorName != null) {
         sectorDisplayText = 'Em Trânsito (de: $lastSectorName)';
       } else {
-        sectorDisplayText = _getSectorName(sectorId); // USA FUNÇÃO GLOBAL
+        sectorDisplayText = _getSectorName(sectorId);
       }
 
       final cliente =
